@@ -12,8 +12,14 @@ import {
     getFactRow,
     listAgentProfiles,
     listFacts,
+    listFactVersions,
     proposeFactFromProfile,
+    publishFact,
+    pullFactsForAgent,
+    retractFact,
+    reviewFact,
     searchFacts,
+    supersedeFact,
     upsertAgentProfile,
     upsertFact
 } from './store.js';
@@ -22,6 +28,7 @@ import {
     FACT_APPROVAL_STATUSES,
     FACT_DERIVATIONS,
     FACT_PRIORITIES,
+    FACT_REGISTRY_CHANNELS,
     FACT_STATUSES,
     FACT_TYPES
 } from './model.js';
@@ -55,7 +62,13 @@ const factMetadataSchema = {
     related_facts: z.array(z.string()).optional().describe('Related fact paths like namespace/key'),
     created_by: z.string().nullable().optional().describe('Agent profile, human, or system that created the fact'),
     approved_by: z.string().nullable().optional().describe('Approver for trusted facts'),
-    approval_status: z.enum(FACT_APPROVAL_STATUSES).optional().describe('Review status')
+    approval_status: z.enum(FACT_APPROVAL_STATUSES).optional().describe('Review status'),
+    registry_channel: z.enum(FACT_REGISTRY_CHANNELS).optional().describe('Working, proposed, review, published, superseded, or retracted channel'),
+    published_at: z.union([z.number(), z.string()]).nullable().optional().describe('When this fact was published'),
+    published_by: z.string().nullable().optional().describe('Publisher for published facts'),
+    change_reason: z.string().nullable().optional().describe('Reason for this fact version or lifecycle transition'),
+    supersedes: z.string().nullable().optional().describe('Fact path this fact supersedes'),
+    superseded_by: z.string().nullable().optional().describe('Fact path that superseded this fact')
 };
 
 const agentProfileSchema = {
@@ -178,7 +191,9 @@ server.registerTool('find_relevant_facts', {
         include_inactive: z.boolean().optional().describe('Include stale, superseded, and retracted facts'),
         include_review: z.boolean().optional().describe('Include facts waiting for review'),
         limit: z.number().int().min(1).max(500).optional().describe('Maximum facts to return'),
-        query: z.string().optional().describe('Optional full-text query')
+        query: z.string().optional().describe('Optional full-text query'),
+        registry_channel: z.enum(FACT_REGISTRY_CHANNELS).optional().describe('Optional registry channel filter'),
+        published_only: z.boolean().optional().describe('Only return published facts')
     }
 }, async (args) => {
     try {
@@ -188,6 +203,30 @@ server.registerTool('find_relevant_facts', {
     }
 });
 
+
+server.registerTool('pull_facts_for_agent', {
+    description: 'Pull published facts ranked for an agent profile and intent',
+    inputSchema: {
+        profile_id: z.string().min(1).describe('Agent profile id to pull facts for'),
+        namespace: z.string().optional().describe('Optional namespace filter'),
+        subject: z.string().optional().describe('Optional subject filter'),
+        scope: z.string().optional().describe('Optional scope filter'),
+        intent: z.string().optional().describe('Current task intent'),
+        actionability: z.enum(FACT_ACTIONABILITIES).optional().describe('Optional actionability filter'),
+        fact_type: z.enum(FACT_TYPES).optional().describe('Optional fact type filter'),
+        status: z.enum(FACT_STATUSES).optional().describe('Optional status filter'),
+        include_inactive: z.boolean().optional().describe('Include inactive facts'),
+        include_review: z.boolean().optional().describe('Include facts waiting for review'),
+        limit: z.number().int().min(1).max(500).optional().describe('Maximum facts to return'),
+        query: z.string().optional().describe('Optional full-text query')
+    }
+}, async (args) => {
+    try {
+        return toolResult(pullFactsForAgent(args));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
 server.registerTool('upsert_fact', {
     description: 'Create or update a fact with optional categorization, provenance, freshness, and actionability metadata',
     inputSchema: {
@@ -227,6 +266,84 @@ server.registerTool('propose_fact', {
     }
 });
 
+
+server.registerTool('list_fact_versions', {
+    description: 'List version and lifecycle events for one fact',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key')
+    }
+}, async ({ namespace, key }) => {
+    return toolResult({ namespace, key, versions: listFactVersions(namespace, key) });
+});
+
+server.registerTool('review_fact', {
+    description: 'Review a proposed fact without publishing it yet',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key'),
+        approved: z.boolean().optional().describe('Whether review approved the fact'),
+        reviewed_by: z.string().optional().describe('Reviewer id'),
+        change_reason: z.string().optional().describe('Review reason')
+    }
+}, async (args) => {
+    try {
+        const { namespace, key, ...input } = args;
+        return toolResult(reviewFact(namespace, key, input));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('publish_fact', {
+    description: 'Publish a reviewed fact into the central published registry channel',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key'),
+        published_by: z.string().optional().describe('Publisher id'),
+        change_reason: z.string().optional().describe('Publish reason')
+    }
+}, async (args) => {
+    try {
+        const { namespace, key, ...input } = args;
+        return toolResult(publishFact(namespace, key, input));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('supersede_fact', {
+    description: 'Mark a fact as superseded by another fact path',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key'),
+        superseded_by: z.string().min(1).describe('Replacement fact path'),
+        change_reason: z.string().optional().describe('Supersession reason')
+    }
+}, async (args) => {
+    try {
+        const { namespace, key, ...input } = args;
+        return toolResult(supersedeFact(namespace, key, input));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('retract_fact', {
+    description: 'Retract a fact from the registry',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key'),
+        change_reason: z.string().optional().describe('Retraction reason')
+    }
+}, async (args) => {
+    try {
+        const { namespace, key, ...input } = args;
+        return toolResult(retractFact(namespace, key, input));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
 server.registerTool('delete_fact', {
     description: 'Delete a fact',
     inputSchema: {

@@ -51,6 +51,19 @@ db.exec(`
     timestamp INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS fact_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL,
+    key TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    registry_channel TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    author TEXT,
+    change_reason TEXT,
+    created_at INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS agent_profiles (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -92,7 +105,14 @@ ensureColumns('facts', [
     { name: 'related_facts', definition: 'TEXT' },
     { name: 'created_by', definition: 'TEXT' },
     { name: 'approved_by', definition: 'TEXT' },
-    { name: 'approval_status', definition: "TEXT NOT NULL DEFAULT 'unreviewed'" }
+    { name: 'approval_status', definition: "TEXT NOT NULL DEFAULT 'unreviewed'" },
+    { name: 'registry_channel', definition: "TEXT NOT NULL DEFAULT 'working'" },
+    { name: 'version', definition: 'INTEGER NOT NULL DEFAULT 1' },
+    { name: 'published_at', definition: 'INTEGER' },
+    { name: 'published_by', definition: 'TEXT' },
+    { name: 'change_reason', definition: 'TEXT' },
+    { name: 'supersedes', definition: 'TEXT' },
+    { name: 'superseded_by', definition: 'TEXT' }
 ]);
 
 ensureColumns('audit_log', [
@@ -107,6 +127,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject);
   CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope);
   CREATE INDEX IF NOT EXISTS idx_facts_actionability ON facts(actionability);
+  CREATE INDEX IF NOT EXISTS idx_facts_registry_channel ON facts(registry_channel);
+  CREATE INDEX IF NOT EXISTS idx_facts_version ON facts(namespace, key, version);
+  CREATE INDEX IF NOT EXISTS idx_fact_versions_fact ON fact_versions(namespace, key, version);
+  CREATE INDEX IF NOT EXISTS idx_fact_versions_event ON fact_versions(event);
   CREATE INDEX IF NOT EXISTS idx_agent_profiles_role ON agent_profiles(role);
 `);
 
@@ -137,6 +161,7 @@ try {
         priority,
         created_by,
         approval_status,
+        registry_channel,
         content='facts',
         content_rowid='rowid'
       );
@@ -145,14 +170,14 @@ try {
         INSERT INTO facts_fts(
           rowid, namespace, key, value, description, fact_type, subject, scope,
           status, derivation, source, evidence, time_period, audience,
-          relevance_tags, actionability, owner, priority, created_by, approval_status
+          relevance_tags, actionability, owner, priority, created_by, approval_status, registry_channel
         )
         VALUES (
           new.rowid, new.namespace, new.key, new.value, new.description,
           new.fact_type, new.subject, new.scope, new.status, new.derivation,
           new.source, new.evidence, new.time_period, new.audience,
           new.relevance_tags, new.actionability, new.owner, new.priority,
-          new.created_by, new.approval_status
+          new.created_by, new.approval_status, new.registry_channel
         );
       END;
 
@@ -161,14 +186,14 @@ try {
           facts_fts, rowid, namespace, key, value, description, fact_type,
           subject, scope, status, derivation, source, evidence, time_period,
           audience, relevance_tags, actionability, owner, priority, created_by,
-          approval_status
+          approval_status, registry_channel
         )
         VALUES(
           'delete', old.rowid, old.namespace, old.key, old.value,
           old.description, old.fact_type, old.subject, old.scope, old.status,
           old.derivation, old.source, old.evidence, old.time_period,
           old.audience, old.relevance_tags, old.actionability, old.owner,
-          old.priority, old.created_by, old.approval_status
+          old.priority, old.created_by, old.approval_status, old.registry_channel
         );
       END;
 
@@ -177,26 +202,26 @@ try {
           facts_fts, rowid, namespace, key, value, description, fact_type,
           subject, scope, status, derivation, source, evidence, time_period,
           audience, relevance_tags, actionability, owner, priority, created_by,
-          approval_status
+          approval_status, registry_channel
         )
         VALUES(
           'delete', old.rowid, old.namespace, old.key, old.value,
           old.description, old.fact_type, old.subject, old.scope, old.status,
           old.derivation, old.source, old.evidence, old.time_period,
           old.audience, old.relevance_tags, old.actionability, old.owner,
-          old.priority, old.created_by, old.approval_status
+          old.priority, old.created_by, old.approval_status, old.registry_channel
         );
         INSERT INTO facts_fts(
           rowid, namespace, key, value, description, fact_type, subject, scope,
           status, derivation, source, evidence, time_period, audience,
-          relevance_tags, actionability, owner, priority, created_by, approval_status
+          relevance_tags, actionability, owner, priority, created_by, approval_status, registry_channel
         )
         VALUES (
           new.rowid, new.namespace, new.key, new.value, new.description,
           new.fact_type, new.subject, new.scope, new.status, new.derivation,
           new.source, new.evidence, new.time_period, new.audience,
           new.relevance_tags, new.actionability, new.owner, new.priority,
-          new.created_by, new.approval_status
+          new.created_by, new.approval_status, new.registry_channel
         );
       END;
     `);
@@ -233,6 +258,13 @@ export interface FactRow {
     created_by: string | null;
     approved_by: string | null;
     approval_status: string;
+    registry_channel: string;
+    version: number;
+    published_at: number | null;
+    published_by: string | null;
+    change_reason: string | null;
+    supersedes: string | null;
+    superseded_by: string | null;
     created_at: number;
     updated_at: number;
 }
@@ -266,4 +298,16 @@ export interface AgentProfileRow {
     requires_human_approval_for: string;
     created_at: number;
     updated_at: number;
+}
+export interface FactVersionRow {
+    id: number;
+    namespace: string;
+    key: string;
+    version: number;
+    event: string;
+    registry_channel: string;
+    snapshot: string;
+    author: string | null;
+    change_reason: string | null;
+    created_at: number;
 }

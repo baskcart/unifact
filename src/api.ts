@@ -12,8 +12,14 @@ import {
     getFactRow,
     listAgentProfiles,
     listFacts,
+    listFactVersions,
     proposeFactFromProfile,
+    publishFact,
+    pullFactsForAgent,
+    retractFact,
+    reviewFact,
     searchFacts,
+    supersedeFact,
     upsertAgentProfile,
     upsertFact
 } from './store.js';
@@ -160,7 +166,9 @@ app.get('/v1/agent-profiles/:id/relevant-facts', requireAuth('read'), (req: Requ
             include_inactive: getQueryBoolean(req, 'include_inactive'),
             include_review: getQueryBoolean(req, 'include_review'),
             limit: getQueryNumber(req, 'limit'),
-            query: getQueryString(req, 'q')
+            query: getQueryString(req, 'q'),
+            registry_channel: getQueryString(req, 'registry_channel'),
+            published_only: getQueryBoolean(req, 'published_only')
         });
 
         const results = relevance.results.filter(result => hasAccess(apiKey, result.fact.namespace, 'read'));
@@ -174,6 +182,36 @@ app.get('/v1/agent-profiles/:id/relevant-facts', requireAuth('read'), (req: Requ
     }
 });
 
+
+app.get('/v1/agent-profiles/:id/pull', requireAuth('read'), (req: Request, res: Response) => {
+    const apiKey = getApiKey(req);
+
+    try {
+        const relevance = pullFactsForAgent({
+            profile_id: req.params.id,
+            namespace: getQueryString(req, 'namespace'),
+            subject: getQueryString(req, 'subject'),
+            scope: getQueryString(req, 'scope'),
+            intent: getQueryString(req, 'intent'),
+            actionability: getQueryString(req, 'actionability'),
+            fact_type: getQueryString(req, 'fact_type'),
+            status: getQueryString(req, 'status'),
+            include_inactive: getQueryBoolean(req, 'include_inactive'),
+            include_review: getQueryBoolean(req, 'include_review'),
+            limit: getQueryNumber(req, 'limit'),
+            query: getQueryString(req, 'q')
+        });
+
+        const results = relevance.results.filter(result => hasAccess(apiKey, result.fact.namespace, 'read'));
+        return res.json({
+            profile: relevance.profile,
+            results,
+            count: results.length
+        });
+    } catch (err) {
+        return handleError(res, err, 'Failed to pull facts for agent profile');
+    }
+});
 const createOrUpdateAgentProfile = (req: Request, res: Response) => {
     try {
         const result = upsertAgentProfile(req.params.id, bodyAsRecord(req));
@@ -255,7 +293,9 @@ app.get('/v1/facts/_relevant', requireAuth('read'), (req: Request, res: Response
             include_inactive: getQueryBoolean(req, 'include_inactive'),
             include_review: getQueryBoolean(req, 'include_review'),
             limit: getQueryNumber(req, 'limit'),
-            query: getQueryString(req, 'q')
+            query: getQueryString(req, 'q'),
+            registry_channel: getQueryString(req, 'registry_channel'),
+            published_only: getQueryBoolean(req, 'published_only')
         });
 
         const results = relevance.results.filter(result => hasAccess(apiKey, result.fact.namespace, 'read'));
@@ -269,6 +309,57 @@ app.get('/v1/facts/_relevant', requireAuth('read'), (req: Request, res: Response
     }
 });
 
+
+app.get('/v1/facts/:namespace/:key/versions', requireAuth('read'), (req: Request, res: Response) => {
+    const { namespace, key } = req.params;
+
+    try {
+        const versions = listFactVersions(namespace, key);
+        return res.json({ namespace, key, versions, count: versions.length });
+    } catch (err) {
+        return handleError(res, err, 'Failed to load fact versions');
+    }
+});
+
+app.post('/v1/facts/:namespace/:key/review', requireAuth('write'), (req: Request, res: Response) => {
+    const { namespace, key } = req.params;
+
+    try {
+        return res.json(reviewFact(namespace, key, bodyAsRecord(req)));
+    } catch (err) {
+        return handleError(res, err, 'Failed to review fact');
+    }
+});
+
+app.post('/v1/facts/:namespace/:key/publish', requireAuth('write'), (req: Request, res: Response) => {
+    const { namespace, key } = req.params;
+
+    try {
+        return res.json(publishFact(namespace, key, bodyAsRecord(req)));
+    } catch (err) {
+        return handleError(res, err, 'Failed to publish fact');
+    }
+});
+
+app.post('/v1/facts/:namespace/:key/supersede', requireAuth('write'), (req: Request, res: Response) => {
+    const { namespace, key } = req.params;
+
+    try {
+        return res.json(supersedeFact(namespace, key, bodyAsRecord(req)));
+    } catch (err) {
+        return handleError(res, err, 'Failed to supersede fact');
+    }
+});
+
+app.post('/v1/facts/:namespace/:key/retract', requireAuth('write'), (req: Request, res: Response) => {
+    const { namespace, key } = req.params;
+
+    try {
+        return res.json(retractFact(namespace, key, bodyAsRecord(req)));
+    } catch (err) {
+        return handleError(res, err, 'Failed to retract fact');
+    }
+});
 app.get('/v1/facts/:namespace/:key/audit', requireAuth('read'), (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 

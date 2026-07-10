@@ -1,3 +1,22 @@
+export const FACT_REGISTRY_CHANNELS = [
+    'working',
+    'proposed',
+    'review',
+    'published',
+    'superseded',
+    'retracted'
+] as const;
+
+export const FACT_VERSION_EVENTS = [
+    'create',
+    'update',
+    'propose',
+    'review',
+    'publish',
+    'supersede',
+    'retract',
+    'delete'
+] as const;
 export const FACT_TYPES = [
     'entity_fact',
     'state_fact',
@@ -45,6 +64,8 @@ export const FACT_APPROVAL_STATUSES = [
     'rejected'
 ] as const;
 
+export type FactRegistryChannel = typeof FACT_REGISTRY_CHANNELS[number];
+export type FactVersionEvent = typeof FACT_VERSION_EVENTS[number];
 export type FactType = typeof FACT_TYPES[number];
 export type FactStatus = typeof FACT_STATUSES[number];
 export type FactDerivation = typeof FACT_DERIVATIONS[number];
@@ -78,8 +99,28 @@ export interface FactResponse {
     created_by: string | null;
     approved_by: string | null;
     approval_status: string;
+    registry_channel: string;
+    version: number;
+    published_at: number | null;
+    published_by: string | null;
+    change_reason: string | null;
+    supersedes: string | null;
+    superseded_by: string | null;
     created_at: number;
     updated_at: number;
+}
+
+export interface FactVersionResponse {
+    id: number;
+    namespace: string;
+    key: string;
+    version: number;
+    event: string;
+    registry_channel: string;
+    snapshot: unknown;
+    author: string | null;
+    change_reason: string | null;
+    created_at: number;
 }
 
 export interface AgentProfileResponse {

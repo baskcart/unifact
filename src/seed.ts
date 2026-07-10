@@ -33,15 +33,15 @@ const SEED_FACTS: SeedFact[] = [
     {
         namespace: 'company.decisions',
         key: 'unifact-backend',
-        value: 'SQLite + FTS5 chosen over DynamoDB.',
-        description: 'UniFact Day 1 uses local-first SQLite with built-in full-text search before adding remote infrastructure.',
+        value: 'SQLite + FTS5 is the local and development backend; hosted SMB deployments may use DynamoDB behind the same Unifact API.',
+        description: 'Storage choice is deployment topology, not product identity: agents use the Unifact API/model while local/dev can use SQLite and hosted SMB can use DynamoDB.',
         fact_type: 'decision_fact',
         subject: 'unifact',
         scope: 'platform',
         derivation: 'asserted',
         actionability: 'decision_record',
         audience: ['general-agent', 'coding-agent'],
-        relevance_tags: ['architecture', 'local-first'],
+        relevance_tags: ['architecture', 'local-first', 'storage-adapter'],
         priority: 'normal',
         approval_status: 'approved',
         created_by: 'seed'
@@ -75,6 +75,54 @@ const SEED_FACTS: SeedFact[] = [
         audience: ['general-agent', 'coding-agent'],
         relevance_tags: ['migration', 'architecture'],
         priority: 'normal',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.decisions',
+        key: 'unifact-public-product-name',
+        value: 'Unifact is the end-user product and agent-facing fact registry; Dahg-ai is only an internal project name.',
+        description: 'Dahg-ai may appear in internal project history, but customer-facing surfaces, APIs, registry language, and agent integrations should use Unifact.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'brand',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'coding-agent'],
+        relevance_tags: ['brand', 'positioning', 'customer-communication'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.decisions',
+        key: 'unifact-storage-topology',
+        value: 'Unifact is the fact API, model, and registry lifecycle; SQLite and DynamoDB are storage adapters for different deployment modes.',
+        description: 'Use SQLite for local/dev working stores and DynamoDB for hosted SMB central registry deployments while preserving one Unifact API/MCP contract for agents.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'architecture',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'coding-agent', 'operations-agent'],
+        relevance_tags: ['architecture', 'storage-adapter', 'registry'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.decisions',
+        key: 'unifact-registry-lifecycle',
+        value: 'Facts move from working/proposed/review channels into a published central registry, and agents pull published facts relevant to their operations.',
+        description: 'Unifact is a DB-backed fact registry with Git-like lifecycle semantics: propose, review, publish, supersede, retract, history, and pull.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'product',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'coding-agent', 'operations-agent'],
+        relevance_tags: ['registry', 'publish', 'pull', 'agent-coordination'],
+        priority: 'critical',
         approval_status: 'approved',
         created_by: 'seed'
     },
@@ -264,7 +312,13 @@ function runSeed() {
 
     for (const item of SEED_FACTS) {
         const { namespace, key, ...input } = item;
-        const result = upsertFact(namespace, key, input);
+        const result = upsertFact(namespace, key, {
+            ...input,
+            registry_channel: 'published',
+            published_by: 'seed',
+            published_at: Date.now(),
+            _event: 'publish'
+        });
         console.log(`${result.action}: ${namespace}/${key}`);
     }
 

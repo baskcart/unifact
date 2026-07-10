@@ -1,13 +1,16 @@
-import { db, AgentProfileRow, FactRow } from './db.js';
+import { db, AgentProfileRow, FactRow, FactVersionRow } from './db.js';
 import {
     AgentProfileResponse,
     FACT_ACTIONABILITIES,
     FACT_APPROVAL_STATUSES,
     FACT_DERIVATIONS,
     FACT_PRIORITIES,
+    FACT_REGISTRY_CHANNELS,
+    FACT_VERSION_EVENTS,
     FACT_STATUSES,
     FACT_TYPES,
     FactResponse,
+    FactVersionResponse,
     hasOwn,
     normalizeBoolean,
     normalizeConfidence,
@@ -28,7 +31,8 @@ export const FACT_SELECT_COLUMNS = `
   derivation, confidence, source, evidence, valid_from, valid_until,
   observed_at, time_period, audience, relevance_tags, actionability, owner,
   priority, related_facts, created_by, approved_by, approval_status,
-  created_at, updated_at
+  registry_channel, version, published_at, published_by, change_reason,
+  supersedes, superseded_by, created_at, updated_at
 `;
 
 const AGENT_PROFILE_SELECT_COLUMNS = `
@@ -63,6 +67,12 @@ type FactColumns = {
     created_by: string | null;
     approved_by: string | null;
     approval_status: string;
+    registry_channel: string;
+    published_at: number | null;
+    published_by: string | null;
+    change_reason: string | null;
+    supersedes: string | null;
+    superseded_by: string | null;
 };
 
 type AgentProfileColumns = {
@@ -106,6 +116,8 @@ export interface RelevantFactQuery {
     include_review?: boolean;
     limit?: number;
     query?: string;
+    registry_channel?: string;
+    published_only?: boolean;
 }
 
 export interface RelevantFactResult {
@@ -179,7 +191,15 @@ function buildFactColumns(input: InputRecord, existing?: FactRow): FactColumns {
         approved_by: maybeString(input, 'approved_by', existing?.approved_by),
         approval_status: hasOwn(input, 'approval_status')
             ? normalizeEnumValue(input.approval_status, FACT_APPROVAL_STATUSES, 'approval_status')
-            : existing?.approval_status ?? 'unreviewed'
+            : existing?.approval_status ?? 'unreviewed',
+        registry_channel: hasOwn(input, 'registry_channel')
+            ? normalizeEnumValue(input.registry_channel, FACT_REGISTRY_CHANNELS, 'registry_channel')
+            : existing?.registry_channel ?? (input.approval_status === 'approved' ? 'published' : 'working'),
+        published_at: maybeTimestamp(input, 'published_at', existing?.published_at),
+        published_by: maybeString(input, 'published_by', existing?.published_by),
+        change_reason: maybeString(input, 'change_reason', existing?.change_reason),
+        supersedes: maybeString(input, 'supersedes', existing?.supersedes),
+        superseded_by: maybeString(input, 'superseded_by', existing?.superseded_by)
     };
 }
 
@@ -236,6 +256,13 @@ export function factFromRow(row: FactRow): FactResponse {
         created_by: row.created_by,
         approved_by: row.approved_by,
         approval_status: row.approval_status,
+        registry_channel: row.registry_channel,
+        version: row.version,
+        published_at: row.published_at,
+        published_by: row.published_by,
+        change_reason: row.change_reason,
+        supersedes: row.supersedes,
+        superseded_by: row.superseded_by,
         created_at: row.created_at,
         updated_at: row.updated_at
     };
@@ -290,12 +317,72 @@ export function searchFacts(query: string): FactRow[] {
     `).all(query) as FactRow[];
 }
 
+export function factVersionFromRow(row: FactVersionRow): FactVersionResponse {
+    return {
+        id: row.id,
+        namespace: row.namespace,
+        key: row.key,
+        version: row.version,
+        event: row.event,
+        registry_channel: row.registry_channel,
+        snapshot: parseJsonPayload(row.snapshot),
+        author: row.author,
+        change_reason: row.change_reason,
+        created_at: row.created_at
+    };
+}
+
+function recordFactVersion(row: FactRow, event: string, author: string | null, changeReason: string | null, now: number) {
+    db.prepare(`
+      INSERT INTO fact_versions (
+        namespace, key, version, event, registry_channel, snapshot,
+        author, change_reason, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+        row.namespace,
+        row.key,
+        row.version,
+        event,
+        row.registry_channel,
+        JSON.stringify(factFromRow(row)),
+        author,
+        changeReason,
+        now
+    );
+}
+
+function requestedVersionEvent(input: InputRecord, action: 'CREATE' | 'UPDATE'): string {
+    if (hasOwn(input, '_event')) {
+        return normalizeEnumValue(input._event, FACT_VERSION_EVENTS, '_event');
+    }
+    return action === 'CREATE' ? 'create' : 'update';
+}
+
+function versionAuthor(columns: FactColumns): string | null {
+    return columns.published_by ?? columns.approved_by ?? columns.created_by;
+}
+
+export function listFactVersions(namespace: string, key: string): FactVersionResponse[] {
+    const rows = db.prepare(`
+      SELECT id, namespace, key, version, event, registry_channel,
+             snapshot, author, change_reason, created_at
+      FROM fact_versions
+      WHERE namespace = ? AND key = ?
+      ORDER BY id DESC
+    `).all(namespace, key) as FactVersionRow[];
+
+    return rows.map(factVersionFromRow);
+}
+
 export function upsertFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
     const storedValue = serializeValue(input.value);
     const now = Date.now();
     const existing = getFactRow(namespace, key);
     const columns = buildFactColumns(input, existing);
     const action: 'CREATE' | 'UPDATE' = existing ? 'UPDATE' : 'CREATE';
+    const event = requestedVersionEvent(input, action);
+    const nextVersion = existing ? existing.version + 1 : 1;
     const oldSnapshot = existing ? JSON.stringify(factFromRow(existing)) : null;
 
     const saved = db.transaction(() => {
@@ -307,7 +394,9 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
                   valid_from = ?, valid_until = ?, observed_at = ?, time_period = ?,
                   audience = ?, relevance_tags = ?, actionability = ?, owner = ?,
                   priority = ?, related_facts = ?, created_by = ?, approved_by = ?,
-                  approval_status = ?, updated_at = ?
+                  approval_status = ?, registry_channel = ?, version = ?, published_at = ?,
+                  published_by = ?, change_reason = ?, supersedes = ?, superseded_by = ?,
+                  updated_at = ?
               WHERE namespace = ? AND key = ?
             `).run(
                 storedValue,
@@ -333,6 +422,13 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
                 columns.created_by,
                 columns.approved_by,
                 columns.approval_status,
+                columns.registry_channel,
+                nextVersion,
+                columns.published_at,
+                columns.published_by,
+                columns.change_reason,
+                columns.supersedes,
+                columns.superseded_by,
                 now,
                 namespace,
                 key
@@ -344,9 +440,11 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
                 status, derivation, confidence, source, evidence, valid_from,
                 valid_until, observed_at, time_period, audience, relevance_tags,
                 actionability, owner, priority, related_facts, created_by,
-                approved_by, approval_status, created_at, updated_at
+                approved_by, approval_status, registry_channel, version,
+                published_at, published_by, change_reason, supersedes,
+                superseded_by, created_at, updated_at
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (${Array(34).fill('?').join(', ')})
             `).run(
                 namespace,
                 key,
@@ -373,6 +471,13 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
                 columns.created_by,
                 columns.approved_by,
                 columns.approval_status,
+                columns.registry_channel,
+                nextVersion,
+                columns.published_at,
+                columns.published_by,
+                columns.change_reason,
+                columns.supersedes,
+                columns.superseded_by,
                 now,
                 now
             );
@@ -400,6 +505,7 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
             now
         );
 
+        recordFactVersion(savedRow, event, versionAuthor(columns), columns.change_reason, now);
         return savedRow;
     })() as FactRow;
 
@@ -418,6 +524,7 @@ export function deleteFact(namespace: string, key: string): boolean {
 
     const now = Date.now();
     db.transaction(() => {
+        recordFactVersion(existing, 'delete', existing.created_by, existing.change_reason, now);
         db.prepare('DELETE FROM facts WHERE namespace = ? AND key = ?').run(namespace, key);
         db.prepare(`
           INSERT INTO audit_log (
@@ -430,7 +537,6 @@ export function deleteFact(namespace: string, key: string): boolean {
 
     return true;
 }
-
 export function getAgentProfileRow(id: string): AgentProfileRow | undefined {
     return db.prepare(`
       SELECT ${AGENT_PROFILE_SELECT_COLUMNS}
@@ -716,6 +822,13 @@ export function findRelevantFacts(query: RelevantFactQuery): { profile: AgentPro
         clauses.push('actionability = ?');
         params.push(normalizeEnumValue(query.actionability, FACT_ACTIONABILITIES, 'actionability'));
     }
+    if (query.published_only) {
+        clauses.push("registry_channel = 'published'");
+    } else if (query.registry_channel) {
+        clauses.push('registry_channel = ?');
+        params.push(normalizeEnumValue(query.registry_channel, FACT_REGISTRY_CHANNELS, 'registry_channel'));
+    }
+
     if (query.status) {
         clauses.push('status = ?');
         params.push(normalizeEnumValue(query.status, FACT_STATUSES, 'status'));
@@ -770,7 +883,11 @@ export function proposeFactFromProfile(profileId: string, namespace: string, key
         status: hasOwn(input, 'status') ? input.status : profile.can_approve_facts ? 'active' : 'needs_review',
         approval_status: hasOwn(input, 'approval_status')
             ? input.approval_status
-            : profile.can_approve_facts ? 'approved' : 'pending'
+            : profile.can_approve_facts ? 'approved' : 'pending',
+        registry_channel: hasOwn(input, 'registry_channel')
+            ? input.registry_channel
+            : profile.can_approve_facts ? 'published' : 'proposed',
+        _event: 'propose'
     };
 
     if (profile.can_approve_facts && !hasOwn(input, 'approved_by')) {
@@ -778,4 +895,102 @@ export function proposeFactFromProfile(profileId: string, namespace: string, key
     }
 
     return upsertFact(namespace, key, proposed);
+}
+function transitionFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+    const existing = getFactRow(namespace, key);
+    if (!existing) {
+        throw new Error(`Fact '${key}' not found in namespace '${namespace}'`);
+    }
+
+    return upsertFact(namespace, key, {
+        ...input,
+        value: hasOwn(input, 'value') ? input.value : existing.value,
+        description: hasOwn(input, 'description') ? input.description : existing.description,
+        fact_type: hasOwn(input, 'fact_type') ? input.fact_type : existing.fact_type,
+        subject: hasOwn(input, 'subject') ? input.subject : existing.subject,
+        scope: hasOwn(input, 'scope') ? input.scope : existing.scope,
+        derivation: hasOwn(input, 'derivation') ? input.derivation : existing.derivation,
+        confidence: hasOwn(input, 'confidence') ? input.confidence : existing.confidence,
+        source: hasOwn(input, 'source') ? input.source : existing.source,
+        evidence: hasOwn(input, 'evidence') ? input.evidence : existing.evidence,
+        valid_from: hasOwn(input, 'valid_from') ? input.valid_from : existing.valid_from,
+        valid_until: hasOwn(input, 'valid_until') ? input.valid_until : existing.valid_until,
+        observed_at: hasOwn(input, 'observed_at') ? input.observed_at : existing.observed_at,
+        time_period: hasOwn(input, 'time_period') ? input.time_period : existing.time_period,
+        audience: hasOwn(input, 'audience') ? input.audience : parseStringList(existing.audience),
+        relevance_tags: hasOwn(input, 'relevance_tags') ? input.relevance_tags : parseStringList(existing.relevance_tags),
+        actionability: hasOwn(input, 'actionability') ? input.actionability : existing.actionability,
+        owner: hasOwn(input, 'owner') ? input.owner : existing.owner,
+        priority: hasOwn(input, 'priority') ? input.priority : existing.priority,
+        related_facts: hasOwn(input, 'related_facts') ? input.related_facts : parseStringList(existing.related_facts),
+        created_by: hasOwn(input, 'created_by') ? input.created_by : existing.created_by,
+        approved_by: hasOwn(input, 'approved_by') ? input.approved_by : existing.approved_by,
+        approval_status: hasOwn(input, 'approval_status') ? input.approval_status : existing.approval_status,
+        registry_channel: hasOwn(input, 'registry_channel') ? input.registry_channel : existing.registry_channel,
+        published_at: hasOwn(input, 'published_at') ? input.published_at : existing.published_at,
+        published_by: hasOwn(input, 'published_by') ? input.published_by : existing.published_by,
+        change_reason: hasOwn(input, 'change_reason') ? input.change_reason : existing.change_reason,
+        supersedes: hasOwn(input, 'supersedes') ? input.supersedes : existing.supersedes,
+        superseded_by: hasOwn(input, 'superseded_by') ? input.superseded_by : existing.superseded_by,
+        _event: input._event
+    });
+}
+
+export function reviewFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+    const approved = hasOwn(input, 'approved') ? normalizeBoolean(input.approved, 'approved') : true;
+    const reviewer = normalizeNullableString(input.reviewed_by ?? input.approved_by, 'reviewed_by');
+
+    return transitionFact(namespace, key, {
+        ...input,
+        registry_channel: 'review',
+        status: approved ? 'needs_review' : 'retracted',
+        approval_status: approved ? 'approved' : 'rejected',
+        approved_by: reviewer,
+        _event: 'review'
+    });
+}
+
+export function publishFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+    const now = Date.now();
+    const publisher = normalizeNullableString(input.published_by ?? input.approved_by, 'published_by');
+
+    return transitionFact(namespace, key, {
+        ...input,
+        registry_channel: 'published',
+        status: 'active',
+        approval_status: 'approved',
+        approved_by: hasOwn(input, 'approved_by') ? input.approved_by : publisher,
+        published_by: publisher,
+        published_at: hasOwn(input, 'published_at') ? input.published_at : now,
+        _event: 'publish'
+    });
+}
+
+export function retractFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+    return transitionFact(namespace, key, {
+        ...input,
+        registry_channel: 'retracted',
+        status: 'retracted',
+        approval_status: hasOwn(input, 'approval_status') ? input.approval_status : 'rejected',
+        _event: 'retract'
+    });
+}
+
+export function supersedeFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+    const supersededBy = normalizeRequiredString(input.superseded_by, 'superseded_by');
+
+    return transitionFact(namespace, key, {
+        ...input,
+        registry_channel: 'superseded',
+        status: 'superseded',
+        superseded_by: supersededBy,
+        _event: 'supersede'
+    });
+}
+
+export function pullFactsForAgent(query: RelevantFactQuery): { profile: AgentProfileResponse | null; results: RelevantFactResult[]; count: number } {
+    return findRelevantFacts({
+        ...query,
+        published_only: query.published_only ?? true
+    });
 }

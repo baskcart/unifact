@@ -125,6 +125,38 @@ const SEED_FACTS: SeedFact[] = [
         priority: 'high',
         approval_status: 'approved',
         created_by: 'seed'
+    },
+    {
+        namespace: 'company.constraints',
+        key: 'coding-session-fact-check',
+        value: 'Builder and coding agents must run a Fact Check before starting code changes.',
+        description: 'Before editing code, retrieve relevant decision, constraint, architecture, naming, and product facts so local changes do not contradict existing project context.',
+        fact_type: 'constraint_fact',
+        subject: 'coding-session',
+        scope: 'repository',
+        derivation: 'asserted',
+        actionability: 'constraint',
+        audience: ['builder-agent', 'coding-agent'],
+        relevance_tags: ['code_change', 'fact_check', 'preflight'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.constraints',
+        key: 'coding-session-git-pull',
+        value: 'Builder and coding agents must run git pull before starting code changes.',
+        description: 'Before editing code, sync the current branch from its configured upstream. If no upstream is configured, record that pull was attempted and why it could not complete.',
+        fact_type: 'constraint_fact',
+        subject: 'coding-session',
+        scope: 'repository',
+        derivation: 'asserted',
+        actionability: 'constraint',
+        audience: ['builder-agent', 'coding-agent'],
+        relevance_tags: ['code_change', 'repo_sync', 'git_pull', 'preflight'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
     }
 ];
 
@@ -192,6 +224,22 @@ const SEED_AGENT_PROFILES: SeedAgentProfile[] = [
         can_approve_facts: false,
         allowed_actions: ['update_source_system', 'create_task', 'draft_message'],
         requires_human_approval_for: ['customer_contact', 'external_system_write', 'blocks_action']
+    },
+    {
+        id: 'builder-agent',
+        name: 'Builder Agent',
+        description: 'Plans and edits code after checking shared facts, syncing the repository, and respecting project decisions and constraints.',
+        role: 'builder-agent',
+        allowed_fact_types: ['entity_fact', 'state_fact', 'insight_fact', 'decision_fact', 'constraint_fact', 'preference_fact', 'actionable_fact'],
+        writable_fact_types: ['state_fact', 'insight_fact', 'decision_fact', 'constraint_fact', 'actionable_fact'],
+        relevant_scopes: ['repository', 'platform', 'product', 'company', 'architecture', 'brand'],
+        relevant_subjects: ['*'],
+        intents: ['fact_check', 'repo_sync', 'code_change', 'implementation', 'review', 'testing', 'commit'],
+        audience_tags: ['builder-agent', 'coding-agent', 'general-agent'],
+        can_propose_facts: true,
+        can_approve_facts: false,
+        allowed_actions: ['read_relevant_facts', 'git_pull', 'edit_code', 'run_tests', 'commit_changes'],
+        requires_human_approval_for: ['destructive_git_action', 'external_system_write', 'production_deploy']
     },
     {
         id: 'curator-agent',

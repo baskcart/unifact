@@ -4,19 +4,26 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import * as z from 'zod/v4';
 import { db, AuditLogRow } from './db.js';
 import {
+    approveFact,
     deleteAgentProfile,
     deleteFact,
     factFromRow,
     findRelevantFacts,
     getAgentProfileRow,
     getFactRow,
+    getRegistryMetadata,
+    getSyncStatus,
     listAgentProfiles,
     listFacts,
     listFactVersions,
+    listReviewQueue,
     proposeFactFromProfile,
     publishFact,
     pullFactsForAgent,
+    pullFactsFromRemote,
+    pushFactsToRemote,
     retractFact,
+    rejectFact,
     reviewFact,
     searchFacts,
     supersedeFact,
@@ -125,6 +132,12 @@ server.registerTool('list_namespaces', {
         namespaces: rows,
         count: rows.length
     });
+});
+
+server.registerTool('registry_metadata', {
+    description: 'Get cloud-neutral Unifact registry metadata, capabilities, tenant isolation, and upstream configuration'
+}, async () => {
+    return toolResult(getRegistryMetadata());
 });
 
 server.registerTool('list_facts', {
@@ -275,6 +288,50 @@ server.registerTool('list_fact_versions', {
     }
 }, async ({ namespace, key }) => {
     return toolResult({ namespace, key, versions: listFactVersions(namespace, key) });
+});
+
+server.registerTool('list_review_queue', {
+    description: 'List proposed or reviewed facts waiting for curator approval',
+    inputSchema: {
+        namespace: z.string().optional().describe('Optional namespace filter'),
+        limit: z.number().int().min(1).max(500).optional().describe('Maximum facts to return')
+    }
+}, async (args) => {
+    return toolResult(listReviewQueue(args));
+});
+
+server.registerTool('approve_fact', {
+    description: 'Approve and publish a proposed fact in one curator action',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key'),
+        reviewed_by: z.string().optional().describe('Reviewer or curator id'),
+        change_reason: z.string().optional().describe('Approval reason')
+    }
+}, async (args) => {
+    try {
+        const { namespace, key, ...input } = args;
+        return toolResult(approveFact(namespace, key, input));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('reject_fact', {
+    description: 'Reject a proposed fact and remove it from the published pull path',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key'),
+        reviewed_by: z.string().optional().describe('Reviewer or curator id'),
+        change_reason: z.string().optional().describe('Rejection reason')
+    }
+}, async (args) => {
+    try {
+        const { namespace, key, ...input } = args;
+        return toolResult(rejectFact(namespace, key, input));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
 });
 
 server.registerTool('review_fact', {
@@ -436,6 +493,42 @@ server.registerTool('delete_agent_profile', {
     }
 
     return toolResult({ success: true, action: 'DELETE', id });
+});
+
+server.registerTool('sync_status', {
+    description: 'Get upstream staging registry status and configuration'
+}, async () => {
+    try {
+        return toolResult(getSyncStatus());
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('sync_pull', {
+    description: 'Pull published facts from the configured upstream registry',
+    inputSchema: {
+        namespaces: z.array(z.string()).optional().describe('Optional list of namespaces to pull')
+    }
+}, async ({ namespaces }) => {
+    try {
+        return toolResult(await pullFactsFromRemote(namespaces));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('sync_push', {
+    description: 'Push proposed facts to the configured upstream staging registry for review',
+    inputSchema: {
+        namespaces: z.array(z.string()).optional().describe('Optional list of namespaces to push')
+    }
+}, async ({ namespaces }) => {
+    try {
+        return toolResult(await pushFactsToRemote(namespaces));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
 });
 
 async function main() {

@@ -4,19 +4,26 @@ import { db, AuditLogRow } from './db.js';
 import { formatFacts, FormatType, FactData } from './format.js';
 import { requireAuth, hasAccess } from './auth.js';
 import {
+    approveFact,
     deleteAgentProfile,
     deleteFact,
     factFromRow,
     findRelevantFacts,
     getAgentProfileRow,
     getFactRow,
+    getRegistryMetadata,
+    getSyncStatus,
     listAgentProfiles,
     listFacts,
     listFactVersions,
+    listReviewQueue,
     proposeFactFromProfile,
     publishFact,
     pullFactsForAgent,
+    pullFactsFromRemote,
+    pushFactsToRemote,
     retractFact,
+    rejectFact,
     reviewFact,
     searchFacts,
     supersedeFact,
@@ -133,6 +140,14 @@ app.get('/v1/agent-profiles', requireAuth('read'), (_req: Request, res: Response
         return res.json({ profiles, count: profiles.length });
     } catch (err) {
         return handleError(res, err, 'Failed to list agent profiles');
+    }
+});
+
+app.get('/v1/registry/metadata', requireAuth('read'), (_req: Request, res: Response) => {
+    try {
+        return res.json(getRegistryMetadata());
+    } catch (err) {
+        return handleError(res, err, 'Failed to load registry metadata');
     }
 });
 
@@ -309,6 +324,24 @@ app.get('/v1/facts/_relevant', requireAuth('read'), (req: Request, res: Response
     }
 });
 
+app.get('/v1/facts/_review-queue', requireAuth('read'), (req: Request, res: Response) => {
+    const apiKey = getApiKey(req);
+
+    try {
+        const queue = listReviewQueue({
+            namespace: getQueryString(req, 'namespace'),
+            limit: getQueryNumber(req, 'limit')
+        });
+        const facts = queue.facts.filter(fact => hasAccess(apiKey, fact.namespace, 'read'));
+        return res.json({
+            facts,
+            count: facts.length
+        });
+    } catch (err) {
+        return handleError(res, err, 'Failed to load review queue');
+    }
+});
+
 
 app.get('/v1/facts/:namespace/:key/versions', requireAuth('read'), (req: Request, res: Response) => {
     const { namespace, key } = req.params;
@@ -328,6 +361,26 @@ app.post('/v1/facts/:namespace/:key/review', requireAuth('write'), (req: Request
         return res.json(reviewFact(namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to review fact');
+    }
+});
+
+app.post('/v1/facts/:namespace/:key/approve', requireAuth('write'), (req: Request, res: Response) => {
+    const { namespace, key } = req.params;
+
+    try {
+        return res.json(approveFact(namespace, key, bodyAsRecord(req)));
+    } catch (err) {
+        return handleError(res, err, 'Failed to approve fact');
+    }
+});
+
+app.post('/v1/facts/:namespace/:key/reject', requireAuth('write'), (req: Request, res: Response) => {
+    const { namespace, key } = req.params;
+
+    try {
+        return res.json(rejectFact(namespace, key, bodyAsRecord(req)));
+    } catch (err) {
+        return handleError(res, err, 'Failed to reject fact');
     }
 });
 
@@ -411,7 +464,10 @@ app.get('/v1/facts/:namespace', requireAuth('read'), (req: Request, res: Respons
     const format = getFormat(req);
 
     try {
-        const rows = listFacts(namespace);
+        const registryChannel = getQueryString(req, 'registry_channel');
+        const rows = registryChannel
+            ? listFacts(namespace).filter(row => row.registry_channel === registryChannel)
+            : listFacts(namespace);
         const facts = rows.map(factFromRow);
 
         if (format === 'json' && wantsMetadata(req)) {
@@ -483,6 +539,43 @@ app.delete('/v1/facts/:namespace/:key', requireAuth('write'), (req: Request, res
     } catch (err) {
         console.error(err);
         return res.status(500).json({ error: 'Internal database error' });
+    }
+});
+
+// Backward-compatible upstream staging endpoints.
+app.get('/v1/sync/status', requireAuth('read'), (req: Request, res: Response) => {
+    try {
+        const status = getSyncStatus();
+        return res.json(status);
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to get sync status' });
+    }
+});
+
+app.post('/v1/sync/pull', requireAuth('write'), async (req: Request, res: Response) => {
+    const { namespaces } = req.body;
+
+    try {
+        const result = await pullFactsFromRemote(namespaces);
+        console.log(`[unifact] Upstream pull: ${result.pulled} pulled, ${result.skipped} skipped, ${result.conflicts} conflicts`);
+        return res.json(result);
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ error: err instanceof Error ? err.message : 'Pull failed' });
+    }
+});
+
+app.post('/v1/sync/push', requireAuth('write'), async (req: Request, res: Response) => {
+    const { namespaces } = req.body;
+
+    try {
+        const result = await pushFactsToRemote(namespaces);
+        console.log(`[unifact] Upstream push: ${result.pushed} pushed, ${result.failed} failed`);
+        return res.json(result);
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ error: err instanceof Error ? err.message : 'Push failed' });
     }
 });
 

@@ -8,7 +8,11 @@
     "start": "tsx src/api.ts",
     "seed": "tsx src/seed.ts",
     "build": "tsc",
-    "mcp": "tsx src/mcp.ts"
+    "mcp": "tsx src/mcp.ts",
+    "cli": "tsx src/cli.ts"
+  },
+  "bin": {
+    "unifact": "./dist/cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

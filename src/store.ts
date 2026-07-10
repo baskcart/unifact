@@ -25,6 +25,7 @@ import {
     serializeStringListOrEmpty,
     serializeValue
 } from './model.js';
+import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
 
 export const FACT_SELECT_COLUMNS = `
   rowid, namespace, key, value, description, fact_type, subject, scope, status,
@@ -942,7 +943,7 @@ export function reviewFact(namespace: string, key: string, input: InputRecord): 
 
     return transitionFact(namespace, key, {
         ...input,
-        registry_channel: 'review',
+        registry_channel: approved ? 'review' : 'retracted',
         status: approved ? 'needs_review' : 'retracted',
         approval_status: approved ? 'approved' : 'rejected',
         approved_by: reviewer,
@@ -993,4 +994,307 @@ export function pullFactsForAgent(query: RelevantFactQuery): { profile: AgentPro
         ...query,
         published_only: query.published_only ?? true
     });
+}
+
+export interface ReviewQueueQuery {
+    namespace?: string;
+    limit?: number;
+}
+
+export interface ReviewQueueResult {
+    facts: FactResponse[];
+    count: number;
+}
+
+export interface RegistryMetadata {
+    service: 'unifact';
+    registry_id: string;
+    role: string;
+    tenant_isolation: string;
+    capabilities: string[];
+    upstream: {
+        configured: boolean;
+        url: string | null;
+        role: string;
+        source: string;
+    };
+    deployment?: {
+        provider?: string;
+    };
+}
+
+export function listReviewQueue(query: ReviewQueueQuery = {}): ReviewQueueResult {
+    const clauses = ["registry_channel IN ('proposed', 'review')"];
+    const params: unknown[] = [];
+
+    if (query.namespace) {
+        clauses.push('namespace = ?');
+        params.push(query.namespace);
+    }
+
+    const rows = db.prepare(`
+      SELECT ${FACT_SELECT_COLUMNS}
+      FROM facts
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY
+        CASE priority
+          WHEN 'critical' THEN 0
+          WHEN 'high' THEN 1
+          WHEN 'normal' THEN 2
+          ELSE 3
+        END,
+        updated_at DESC
+      LIMIT ?
+    `).all(...params, clampLimit(query.limit)) as FactRow[];
+
+    const facts = rows.map(factFromRow);
+    return {
+        facts,
+        count: facts.length
+    };
+}
+
+export function approveFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+    const reviewer = normalizeNullableString(
+        input.reviewed_by ?? input.approved_by ?? input.published_by,
+        'reviewed_by'
+    );
+
+    reviewFact(namespace, key, {
+        ...input,
+        approved: true,
+        reviewed_by: reviewer,
+        approved_by: reviewer
+    });
+
+    return publishFact(namespace, key, {
+        ...input,
+        approved_by: reviewer,
+        published_by: hasOwn(input, 'published_by') ? input.published_by : reviewer
+    });
+}
+
+export function rejectFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+    const reviewer = normalizeNullableString(input.reviewed_by ?? input.approved_by, 'reviewed_by');
+
+    return transitionFact(namespace, key, {
+        ...input,
+        registry_channel: 'retracted',
+        status: 'retracted',
+        approval_status: 'rejected',
+        approved_by: reviewer,
+        _event: 'retract'
+    });
+}
+
+export function getRegistryMetadata(): RegistryMetadata {
+    const config = getSyncConfig();
+    const provider = normalizeNullableString(process.env.UNIFACT_DEPLOYMENT_PROVIDER, 'UNIFACT_DEPLOYMENT_PROVIDER');
+    const metadata: RegistryMetadata = {
+        service: 'unifact',
+        registry_id: process.env.UNIFACT_REGISTRY_ID || 'local',
+        role: process.env.UNIFACT_REGISTRY_ROLE || 'local',
+        tenant_isolation: process.env.UNIFACT_TENANT_ISOLATION || 'single_tenant',
+        capabilities: [
+            'propose',
+            'review',
+            'approve',
+            'reject',
+            'publish',
+            'pull_published',
+            'version_history'
+        ],
+        upstream: {
+            configured: config.enabled,
+            url: config.upstreamUrl,
+            role: config.role,
+            source: config.source
+        }
+    };
+
+    if (provider) {
+        metadata.deployment = { provider };
+    }
+
+    return metadata;
+}
+
+export interface SyncPullResult {
+    success: boolean;
+    pulled: number;
+    skipped: number;
+    conflicts: number;
+    facts: FactResponse[];
+}
+
+export interface SyncPushResult {
+    success: boolean;
+    pushed: number;
+    failed: number;
+    facts: FactResponse[];
+}
+
+export interface SyncStatusResult {
+    enabled: boolean;
+    upstreamUrl: string | null;
+    remoteUrl: string | null;
+    role: string;
+    branch: string;
+    source: string;
+    localFacts: number;
+    reviewQueue: number;
+    lastSync: number | null;
+}
+
+export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPullResult> {
+    const config = getSyncConfig();
+    if (!config.enabled || !config.upstreamUrl || !config.apiKey) {
+        throw new Error('Upstream registry not configured. Set UNIFACT_UPSTREAM_REGISTRY_URL and UNIFACT_API_KEY.');
+    }
+
+    const remoteUrl = getRemoteBranchUrl();
+    if (!remoteUrl) {
+        throw new Error('Could not determine remote URL');
+    }
+
+    try {
+        const targetNamespaces = namespaces || ['company.decisions', 'company.constraints', 'company.branding'];
+        let pulled = 0;
+        let skipped = 0;
+        let conflicts = 0;
+        const pulledFacts: FactResponse[] = [];
+
+        for (const namespace of targetNamespaces) {
+            const response = await fetch(`${remoteUrl}/v1/facts/${namespace}?include_metadata=true&registry_channel=published`, {
+                headers: {
+                    'X-API-Key': config.apiKey,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (!response.ok) {
+                console.warn(`Failed to pull namespace ${namespace}: ${response.statusText}`);
+                continue;
+            }
+
+            const data = await response.json();
+            const remoteFacts = Array.isArray(data) ? data : (data.facts || []);
+
+            for (const remoteFact of remoteFacts) {
+                const existing = getFactRow(remoteFact.namespace, remoteFact.key);
+
+                if (existing) {
+                    if (existing.version >= remoteFact.version) {
+                        skipped++;
+                        continue;
+                    }
+                    if (existing.updated_at >= remoteFact.updated_at) {
+                        conflicts++;
+                        continue;
+                    }
+                }
+
+                const result = upsertFact(remoteFact.namespace, remoteFact.key, remoteFact);
+                pulled++;
+                pulledFacts.push(result.fact);
+            }
+        }
+
+        return {
+            success: true,
+            pulled,
+            skipped,
+            conflicts,
+            facts: pulledFacts
+        };
+    } catch (error) {
+        throw new Error(`Pull failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+export async function pushFactsToRemote(namespaces?: string[]): Promise<SyncPushResult> {
+    const config = getSyncConfig();
+    if (!config.enabled || !config.upstreamUrl || !config.apiKey) {
+        throw new Error('Upstream registry not configured. Set UNIFACT_UPSTREAM_REGISTRY_URL and UNIFACT_API_KEY.');
+    }
+
+    const remoteUrl = getRemoteBranchUrl();
+    if (!remoteUrl) {
+        throw new Error('Could not determine remote URL');
+    }
+
+    try {
+        const targetNamespaces = namespaces || ['company.decisions', 'company.constraints', 'company.branding'];
+        let pushed = 0;
+        let failed = 0;
+        const pushedFacts: FactResponse[] = [];
+
+        for (const namespace of targetNamespaces) {
+            const localFacts = listFacts(namespace).filter(f => 
+                f.registry_channel === 'proposed' || f.registry_channel === 'working'
+            );
+
+            for (const fact of localFacts) {
+                try {
+                    const proposed = {
+                        ...factFromRow(fact),
+                        registry_channel: 'proposed',
+                        approval_status: 'pending',
+                        status: fact.status === 'active' ? 'needs_review' : fact.status
+                    };
+                    const response = await fetch(`${remoteUrl}/v1/facts/${fact.namespace}/${fact.key}`, {
+                        method: 'POST',
+                        headers: {
+                            'X-API-Key': config.apiKey,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(proposed)
+                    });
+
+                    if (!response.ok) {
+                        console.warn(`Failed to push ${fact.namespace}/${fact.key}: ${response.statusText}`);
+                        failed++;
+                        continue;
+                    }
+
+                    pushed++;
+                    pushedFacts.push(factFromRow(fact));
+                } catch (error) {
+                    console.warn(`Error pushing ${fact.namespace}/${fact.key}:`, error);
+                    failed++;
+                }
+            }
+        }
+
+        return {
+            success: true,
+            pushed,
+            failed,
+            facts: pushedFacts
+        };
+    } catch (error) {
+        throw new Error(`Push failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+export function getSyncStatus(): SyncStatusResult {
+    const config = getSyncConfig();
+    const localCount = db.prepare('SELECT COUNT(*) as count FROM facts').get() as { count: number };
+    const reviewQueue = db.prepare(`
+      SELECT COUNT(*) as count
+      FROM facts
+      WHERE registry_channel IN ('proposed', 'review')
+    `).get() as { count: number };
+
+    return {
+        enabled: config.enabled,
+        upstreamUrl: config.upstreamUrl,
+        remoteUrl: config.remoteUrl,
+        role: config.role,
+        branch: config.branch,
+        source: config.source,
+        localFacts: localCount.count,
+        reviewQueue: reviewQueue.count,
+        lastSync: null
+    };
 }

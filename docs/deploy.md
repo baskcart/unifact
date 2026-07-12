@@ -1,12 +1,12 @@
 # Deploy UniFact
 
-UniFact is a normal Node.js (or Docker) service plus a database. It is **not tied to AWS**. You can run it on any host that provides:
+UniFact is a normal Node.js (or Docker) service plus a database. It is **not tied to any cloud vendor**. You can run it on any host that provides:
 
 - A machine or container for the API (Linux is typical)
 - **PostgreSQL** for a shared origin/registry host, **or** SQLite for a single-node / laptop install
 - HTTPS in front of the API (reverse proxy, load balancer, or your platform’s TLS)
 
-AWS Lightsail, ECS/Fargate, a VPS, bare metal, or another cloud all work the same way at the application layer.
+A VPS, bare metal, laptop, or any major cloud all work the same way at the application layer.
 
 ## What you run
 
@@ -88,17 +88,17 @@ Browsers / uni / MCP / apps
 
 Expose only the API (and MCP if you choose). Keep the database private.
 
-## Will this work outside AWS?
+## Will this work on any cloud or on-prem?
 
-**Yes.** UniFact does not call AWS APIs to store facts. It needs:
+**Yes.** UniFact does not call a specific vendor’s control-plane APIs to store facts. It needs:
 
 1. Node 20+ (or the Docker image)
 2. Disk (SQLite) or a Postgres server
 3. Outbound HTTPS if you use `uni meta` (GitHub/GitLab public APIs) or sync to a remote host
 
-What *does* change by provider is ops glue only: how you provision the VM/container, attach disks, issue TLS certificates, and firewall Postgres. The same binary and env vars work on AWS, GCP, Azure, Hetzner, DigitalOcean, on-prem, etc.
+What *does* change by provider is ops glue only: how you provision the VM/container, attach disks, issue TLS certificates, and firewall Postgres. The same binary and env vars work everywhere.
 
-Optional: you may document a concrete recipe for one provider later; it is not required for UniFact to function.
+Optional: you may add a concrete recipe for one provider later; it is not required for UniFact to function.
 
 ## Checklist
 

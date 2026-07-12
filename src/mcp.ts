@@ -28,7 +28,8 @@ import {
     searchFacts,
     supersedeFact,
     upsertAgentProfile,
-    upsertFact
+    upsertFact,
+    feedbackFact
 } from './store.js';
 import {
     FACT_ACTIONABILITIES,
@@ -70,7 +71,7 @@ const factMetadataSchema = {
     created_by: z.string().nullable().optional().describe('Agent profile, human, or system that created the fact'),
     approved_by: z.string().nullable().optional().describe('Approver for trusted facts'),
     approval_status: z.enum(FACT_APPROVAL_STATUSES).optional().describe('Review status'),
-    registry_channel: z.enum(FACT_REGISTRY_CHANNELS).optional().describe('Working, proposed, review, published, superseded, or retracted channel'),
+        registry_channel: z.enum(FACT_REGISTRY_CHANNELS).optional().describe('Working, proposed, review, feedback, published, superseded, or retracted channel'),
     published_at: z.union([z.number(), z.string()]).nullable().optional().describe('When this fact was published'),
     published_by: z.string().nullable().optional().describe('Publisher for published facts'),
     change_reason: z.string().nullable().optional().describe('Reason for this fact version or lifecycle transition'),
@@ -353,7 +354,7 @@ server.registerTool('review_fact', {
 });
 
 server.registerTool('publish_fact', {
-    description: 'Publish a reviewed fact into the central published registry channel',
+    description: 'Publish a fact into the production published channel',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
@@ -364,6 +365,23 @@ server.registerTool('publish_fact', {
     try {
         const { namespace, key, ...input } = args;
         return toolResult(await publishFact(namespace, key, input));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('feedback_fact', {
+    description: 'Owner opens a fact for feedback (visible to local agents; not production truth)',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key'),
+        published_by: z.string().optional().describe('Owner / publisher id'),
+        change_reason: z.string().optional().describe('Why feedback is requested')
+    }
+}, async (args) => {
+    try {
+        const { namespace, key, ...input } = args;
+        return toolResult(await feedbackFact(namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -520,13 +538,21 @@ server.registerTool('sync_pull', {
 });
 
 server.registerTool('sync_push', {
-    description: 'Push proposed facts to the configured upstream staging registry for review',
+    description:
+        'Push local facts upstream. Selectors may be namespaces, exact paths (ns/key), or globs (ns/pattern*).',
     inputSchema: {
-        namespaces: z.array(z.string()).optional().describe('Optional list of namespaces to push')
+        selectors: z
+            .array(z.string())
+            .optional()
+            .describe('Optional selectors: policy, policy/feeling_talk, policy/feeling_*'),
+        namespaces: z
+            .array(z.string())
+            .optional()
+            .describe('Deprecated alias for selectors (namespace-only tokens)')
     }
-}, async ({ namespaces }) => {
+}, async ({ selectors, namespaces }) => {
     try {
-        return toolResult(await pushFactsToRemote(namespaces));
+        return toolResult(await pushFactsToRemote(selectors ?? namespaces));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }

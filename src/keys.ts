@@ -52,6 +52,13 @@ function namespaceAllowed(allowed: string[], namespace: string): boolean {
     });
 }
 
+/** Whether this API key may access a namespace (empty/missing patterns → allow all). */
+export function apiKeyAllowsNamespace(key: ApiKeyRecord | undefined, namespace: string): boolean {
+    if (!key) return true;
+    if (!key.namespaces.length) return true;
+    return namespaceAllowed(key.namespaces, namespace);
+}
+
 export async function countApiKeys(): Promise<number> {
     const row = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM api_keys');
     return row?.n ?? 0;
@@ -83,20 +90,76 @@ export async function getActiveLocalApiKey(): Promise<ApiKeyRecord | undefined> 
     return row ? rowToRecord(row) : undefined;
 }
 
+/** Switch CLI identity to this person (must already hold their local key). */
+export async function usePerson(person: string): Promise<ApiKeyRecord> {
+    const name = person.trim();
+    if (!name) throw new Error('person is required');
+
+    const existing = await getApiKeyByPerson(name);
+    if (!existing) {
+        throw new Error(
+            `No local key for '${name}'. ` +
+                `Create an org (uni init), or join then get approved (uni join → owner approve), ` +
+                `or install a key: uni key create --person ${name} --api-key <secret>`
+        );
+    }
+    if (!existing.enabled) {
+        throw new Error(
+            `Person '${name}' is suspended (access OFF). Owner: uni approve <Registry> ${name}`
+        );
+    }
+    const now = Date.now();
+    await db.run('UPDATE api_keys SET updated_at = ? WHERE person = ?', [now, name]);
+    const updated = await getApiKeyByPerson(name);
+    if (!updated) throw new Error(`Failed to switch to '${name}'`);
+    return updated;
+}
+
+/**
+ * Ensure a local person key exists for join (one-machine friendly).
+ * Generates a new secret if missing — remote sync happens on approve.
+ */
+export async function ensureLocalPersonKey(person: string): Promise<ApiKeyRecord> {
+    const name = person.trim();
+    const existing = await getApiKeyByPerson(name);
+    if (existing) return existing;
+    return createApiKey({ person: name, namespaces: ['*'], enabled: true });
+}
+
 export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyRecord> {
     const person = input.person.trim();
     if (!person) {
         throw new Error('person is required');
     }
 
-    const namespaces = input.namespaces?.length ? input.namespaces : ['*'];
-    const scopes = input.scopes?.length ? input.scopes : (['read', 'write'] as Array<'read' | 'write'>);
-    const apiKey = input.api_key?.trim() || `uf_${person.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24)}_${randomBytes(12).toString('hex')}`;
+    const existing = await getApiKeyByPerson(person);
+    if (existing && input.api_key?.trim() && existing.api_key !== input.api_key.trim()) {
+        throw new Error(
+            `Person '${person}' already has a different key on this host. ` +
+                `Install that key locally (uni key create --person ${person} --api-key …), or use a new person name.`
+        );
+    }
+    const namespaces = input.namespaces?.length
+        ? input.namespaces
+        : existing?.namespaces?.length
+          ? existing.namespaces
+          : ['*'];
+    const scopes = input.scopes?.length
+        ? input.scopes
+        : existing?.scopes?.length
+          ? existing.scopes
+          : (['read', 'write'] as Array<'read' | 'write'>);
     const enabled = input.enabled === false ? 0 : 1;
     const registryName = input.registry_name?.trim() || null;
     const now = Date.now();
 
-    const existing = await getApiKeyByPerson(person);
+    // Keep the existing secret on update unless an explicit api_key is provided
+    // (re-approve must widen namespaces without breaking the member's local key).
+    const apiKey =
+        input.api_key?.trim() ||
+        existing?.api_key ||
+        `uf_${person.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24)}_${randomBytes(12).toString('hex')}`;
+
     if (existing) {
         await db.run(
             `UPDATE api_keys
@@ -107,7 +170,7 @@ export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyReco
                 enabled,
                 serializeStringListOrEmpty(namespaces, 'namespaces'),
                 serializeStringListOrEmpty(scopes, 'scopes'),
-                registryName,
+                registryName ?? existing.registry_name,
                 now,
                 person
             ]

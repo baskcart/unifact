@@ -180,7 +180,8 @@
         <li><strong>Owner creates the registry:</strong> <code>uni init Unifact --person admin</code></li>
         <li><strong>Others request to join:</strong> <code>uni join Unifact --person alice</code></li>
         <li><strong>Owner approves:</strong> <code>uni approve Unifact --person alice --by admin</code></li>
-        <li>Each person gets <strong>one API key</strong> that can be turned <strong>on</strong> or <strong>off</strong>.</li>
+        <li><strong>Owner can pause:</strong> <code>uni suspend Unifact --person alice --by admin</code> (restore with approve).</li>
+        <li>Each person gets <strong>one API key</strong>; approve/suspend control whether it works.</li>
         <li>People and AI assistants use that key to read published facts and propose new ones.</li>
       </ol>
       <div class="note">
@@ -195,7 +196,7 @@
       <div class="who">
         <div>
           <h3>Owners &amp; admins</h3>
-          <p class="muted">Create the org registry, approve who joins, turn keys on/off.</p>
+          <p class="muted">Create the org registry, approve who joins, suspend access when needed.</p>
         </div>
         <div>
           <h3>Teammates</h3>
@@ -242,34 +243,61 @@ uni requests Unifact</pre>
 
       <h3>Check your connection</h3>
       <pre>uni status</pre>
-      <p class="muted">Shows whether you are linked to the shared registry and which person key is active.</p>
+      <p class="muted">Shows whether you are linked to the shared registry and which person key is active. Also lists local working / proposed / published counts.</p>
+
+      <h3>Add a local fact</h3>
+      <pre>uni add "I don't feel talking when there are more people talking"
+uni add "Returns are free within 30 days" --key return_window</pre>
+      <p class="muted">
+        Creates a <strong>proposed</strong> fact. Local agents can use proposed + review + feedback + published.
+        Production agents only use <strong>published</strong>.
+      </p>
+
+      <h3>Owner: publish or open for feedback</h3>
+      <pre>uni push
+uni publish policy/feeling_talk
+uni feedback policy/feeling_sleepy</pre>
+      <p class="muted">
+        On a <strong>shared</strong> registry, owner <code>uni push</code> lands in <code>feedback</code>;
+        others land in <code>review</code>. Owner <code>uni publish</code> only publishes from
+        <code>review</code> or <code>feedback</code> (two-step). Solo registries may publish from
+        <code>proposed</code> directly.
+      </p>
 
       <h3>Get the latest published facts</h3>
       <pre>uni pull</pre>
       <p class="muted">Like refreshing from the source of truth. Only <strong>published</strong> facts come down.</p>
 
       <h3>Send your proposals</h3>
-      <pre>uni push</pre>
-      <p class="muted">Uploads your draft/proposed facts for review — not an automatic publish.</p>
+      <pre>uni push
+uni push policy
+uni push policy/feeling_talk
+uni push policy/feeling_*</pre>
+      <p class="muted">
+        Uploads matching draft/proposed facts for review — not an automatic publish.
+        You can push a whole namespace, one fact path, or a key glob (<code>*</code> / <code>?</code>).
+      </p>
 
       <h3>Your personal key</h3>
       <pre>uni key create --person yourname
-uni key list
-uni key on  --person yourname
-uni key off --person yourname</pre>
+uni key list</pre>
       <p class="muted">
-        Keys are stored in UniFact (not in a password file on your desktop).
-        <strong>Off</strong> means that person cannot use the registry until turned on again.
+        Keys are stored in UniFact. Owners manage access with
+        <code>uni approve</code> / <code>uni suspend</code> (not day-to-day key toggles).
+        For a shared host, use the key printed by the owner's <code>uni approve</code>
+        (<code>uni key create --person you --api-key …</code>) — a local-only key will get
+        <strong>403</strong> on push.
       </p>
     </section>
 
     <section>
       <h2>Inviting someone else</h2>
       <ol class="steps">
-        <li>They run <code>uni join Unifact --person theirname</code> (same org name — not a new registry).</li>
-        <li>You approve: <code>uni approve Unifact --person theirname --by you</code>.</li>
-        <li>They receive an enabled person key, then use <code>uni pull</code> / <code>uni push</code>.</li>
-        <li>If they leave or you need to pause access, turn their key <strong>off</strong>.</li>
+        <li>They run <code>uni join Unifact --person theirname</code> (or <code>uni join staging.unifact.ai/Unifact --person theirname</code> for a remote host).</li>
+        <li>You approve <strong>on that same host</strong>: <code>uni approve Unifact --person theirname --by you</code>.</li>
+        <li>Share the printed key. They install it: <code>uni key create --person theirname --api-key … --namespaces '*'</code>.</li>
+        <li>They use <code>uni pull</code> / <code>uni push</code>.</li>
+        <li>To pause access: <code>uni suspend Unifact --person theirname --by you</code>. Restore with <code>uni approve</code> again (same secret).</li>
       </ol>
       <div class="callout">
         Shared host (for example staging.unifact.ai) can host many org registries.

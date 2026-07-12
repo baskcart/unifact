@@ -11,7 +11,7 @@ UniFact is source control for organizational facts — a **tenanted fact registr
 | Hosting (GitHub) | Host (`staging.unifact.ai` or self-hosted) |
 | Org / repo | **Registry** named by **org** (e.g. `Unifact`) |
 | `git init` / create repo | **`uni init <Org>`** — create org registry; you become owner |
-| Clone + credentials | **`uni join <Org>`** — request membership; owner **`uni approve`** |
+| Clone + credentials | **`uni join <Org>`** — request membership; owner **`uni approve`** / **`uni suspend`** |
 | `git pull` / `git push` | **`uni pull` / `uni push`** |
 | Branch / PR | Channels: working → proposed → review → **published** |
 
@@ -31,7 +31,16 @@ npm run seed      # optional baseline facts
 npm run dev       # API on :4110 (SQLite by default)
 ```
 
-### Person API keys (in the database — not `.env`)
+### Person API keys (advanced)
+
+Keys live in the `api_keys` table. Prefer **membership** commands for access:
+
+```bash
+uni approve DemoOrg --person bob --by admin   # grant / unsuspend
+uni suspend DemoOrg --person bob --by admin   # pause access
+```
+
+Low-level (usually unnecessary):
 
 ```bash
 uni key create --person alice
@@ -40,33 +49,69 @@ uni key on  --person alice
 uni key off --person alice
 ```
 
-Keys live in the `api_keys` table (one per person, enable/disable).  
 `uni pull` / `uni push` use your **enabled** local key automatically.
 
 ### Sync with an origin host
 
-1. Local facts (or config) should include upstream URL, e.g. `company.infrastructure/upstream-registry-url` = `http://staging.unifact.ai`
-2. Your person key must also exist and be **on** on that origin
-3. Then:
+**Required path (do not skip):**
+
+1. Set upstream URL, e.g. `company.infrastructure/upstream-registry-url` = `http://staging.unifact.ai`
+2. Member: `uni join staging.unifact.ai/Unifact --person alice`
+3. Owner (on origin): `uni approve Unifact --person alice --by admin` — grants write namespaces (`*`, `company.*`, …) and prints the person key
+4. Member installs that **same** key locally:  
+   `uni key create --person alice --api-key <printed> --namespaces '*'`
+5. Then:
 
 ```bash
 uni status
 uni pull
-uni push
+uni push                         # all allowed namespaces
+uni push policy                  # one namespace
+uni push policy/feeling_talk     # one fact
+uni push policy/feeling_*        # glob
 ```
 
+Skipping join/approve (or using a key without write scopes) yields **403** on push.
+
 - **pull** — download **published** facts from origin  
-- **push** — upload local **working/proposed** facts to origin as proposed (for review)
+- **push** — upload matching local facts (`proposed` / `review` / `feedback` / `published`). No need to re-add published facts.
+
+### Local facts
+
+```bash
+uni add "I don't feel talking when there are more people talking"
+# → proposed (local agents can use; production cannot yet)
+
+uni publish policy/feeling_talk      # owner → published (production truth)
+uni feedback policy/feeling_sleepy   # owner → feedback (comments, not production)
+uni push policy/feeling_*            # selective sync to origin
+```
+
+| Channel | Local agents | Production agents |
+|---------|--------------|-------------------|
+| proposed / review / feedback / published | yes | no (published only) |
+
+**Push (shared registry):**
+- Owner `uni push` → remote **feedback** (not direct publish)
+- Others `uni push` → remote **review**
+- Owner `uni publish` only promotes **review** or **feedback** → **published** (two-step)
+
+**Solo registry:** `uni publish` may still promote **proposed** directly.
 
 ## CLI
 
 ```text
 uni status
+uni add "<value>" [--key k] [--namespace policy]
+uni publish <namespace/key> | publish --all
+uni feedback <namespace/key> | feedback --all
+uni push [ns | ns/key | ns/pattern*]
 uni pull [namespaces…]
-uni push [namespaces…]
-uni key create --person <name> [--namespaces a,b] [--remote]
+uni key create --person <name> [--namespaces a,b] [--api-key uf_…] [--remote]
 uni key list
-uni key on|off --person <name>
+uni approve <Registry> --person <member> --by <owner>
+uni suspend <Registry> --person <member> --by <owner>
+uni key on|off --person <name>   # advanced; prefer approve/suspend
 uni meta <git-url>
 ```
 
@@ -102,11 +147,14 @@ Auth keys are always rows in `api_keys`, never `UNIFACT_MASTER_KEY` / `UNIFACT_A
 uni init Unifact --person admin [--git-url https://github.com/org/repo]
 uni join Unifact --person alice
 uni approve Unifact --person alice --by admin
+uni suspend Unifact --person alice --by admin   # pause
+uni approve Unifact --person alice --by admin   # restore
 uni registries
 uni requests Unifact
 ```
 
 Optional: `uni join staging.unifact.ai/Unifact --person alice` posts the join request to that host.
+After the owner approves **on that host**, Alice must install the printed key locally before `uni push` will succeed.
 
 ## Deploy
 

@@ -3,20 +3,37 @@ import 'dotenv/config';
 import { getMetadataFromGitUrl } from './git-metadata.js';
 import {
     createApiKey,
+    ensureLocalPersonKey,
     getActiveLocalApiKey,
+    getApiKeyByPerson,
     listApiKeys,
-    setApiKeyEnabled
+    setApiKeyEnabled,
+    usePerson
 } from './keys.js';
 import {
     approveJoin,
+    getTeam,
     initRegistry,
     listJoinRequests,
     listRegistries,
     parseJoinTarget,
-    requestJoin
+    requestJoin,
+    suspendJoin
 } from './registry.js';
+import { sanitizeFactKey, suggestFactKey } from './suggest-key.js';
 import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
-import { getSyncStatus, pullFactsFromRemote, pushFactsToRemote } from './store.js';
+import {
+    feedbackFact,
+    getFactRow,
+    getPushCollaborationContext,
+    getSyncStatus,
+    listFactsByChannels,
+    publishFact,
+    pullFactsFromRemote,
+    parsePushSelector,
+    pushFactsToRemote,
+    upsertFact
+} from './store.js';
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
@@ -26,8 +43,26 @@ async function main() {
         case 'status':
             await statusCommand();
             break;
+        case 'add':
+            await addCommand(args);
+            break;
+        case 'publish':
+            await publishCommand(args);
+            break;
+        case 'feedback':
+            await feedbackCommand(args);
+            break;
+        case 'commit':
+            await commitCommand(args);
+            break;
         case 'init':
             await initCommand(args);
+            break;
+        case 'whoami':
+            await whoamiCommand();
+            break;
+        case 'use':
+            await useCommand(args);
             break;
         case 'join':
             await joinCommand(args);
@@ -35,8 +70,14 @@ async function main() {
         case 'approve':
             await approveCommand(args);
             break;
+        case 'suspend':
+            await suspendCommand(args);
+            break;
         case 'registries':
             await registriesCommand();
+            break;
+        case 'team':
+            await teamCommand(args);
             break;
         case 'requests':
             await requestsCommand(args);
@@ -64,22 +105,45 @@ function printHelp() {
     console.log('');
     console.log('Usage: uni <command>');
     console.log('');
-    console.log('Registry (like git init / join a remote):');
-    console.log('  init <Registry> --person <you> [--git-url <url>]');
-    console.log('  join <Registry|host/Registry> --person <you>');
-    console.log('  approve <Registry> --person <member> --by <owner>');
+    console.log('Facts (local registry):');
+    console.log('  add "<value>" [--key k] [--namespace policy] [--person you]');
+    console.log('      → proposed (local agents can use it; production needs publish)');
+    console.log('  publish <namespace/key> | publish --all [--person you]');
+    console.log('      → published (solo: from proposed; multi-user: from review|feedback only)');
+    console.log('  feedback <namespace/key> | feedback --all [--person you]');
+    console.log('      → feedback (open for comments; not production)');
+    console.log('  push [ns|ns/key|ns/pattern*]  — owner→feedback, others→review');
+    console.log('');
+    console.log('Identity (person name + key secret ≈ user id + password):');
+    console.log('  whoami');
+    console.log('  use <person>          # switch (must already hold that key)');
+    console.log('  use <person> --new    # claim a new local identity (then join)');
+    console.log('');
+    console.log('Registry (membership):');
+    console.log('  init <Registry> [--person you]   # person from context if omitted');
+    console.log('  join <Registry|host/Registry>    # join as you (context)');
+    console.log('  approve <Registry> [member]      # you (owner) approve member');
+    console.log('  suspend <Registry> <member>      # you (owner) pause member');
+    console.log('  team [Registry]                  # owner, members, join requests');
     console.log('  registries');
-    console.log('  requests [Registry]');
     console.log('');
     console.log('Sync:');
-    console.log('  status | pull | push');
+    console.log('  status | pull | push [selectors…]');
     console.log('');
-    console.log('Keys:');
-    console.log('  key list | key on|off --person <name>');
+    console.log('Advanced (technical):');
+    console.log('  key list | key create --person <name> [--namespaces a,b] [--api-key uf_…] [--remote]');
+    console.log('  key on|off --person <name>   # low-level; prefer approve / suspend');
     console.log('  meta <git-url>');
     console.log('');
     console.log('First person: uni init Unifact --person admin');
-    console.log('Others:       uni join Unifact --person alice  (owner: uni approve …)');
+    console.log('Others:       uni use alice && uni join host/Unifact');
+    console.log('Owner:        uni use admin && uni approve Unifact alice');
+    console.log('');
+    console.log('Local fact loop:');
+    console.log('  uni add "Returns are free within 30 days"');
+    console.log('  uni publish policy/return_window');
+    console.log('  uni push policy/return_window');
+    console.log('  uni push policy/feeling_*');
 }
 
 function parseFlag(argv: string[], name: string): string | undefined {
@@ -92,39 +156,436 @@ function hasFlag(argv: string[], name: string): boolean {
     return argv.includes(name);
 }
 
-async function statusCommand() {
+const BOOLEAN_FLAGS = new Set(['--all', '--publish', '--new', '--pull']);
+
+function positionalArgs(argv: string[]): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < argv.length; i++) {
+        const arg = argv[i];
+        if (arg.startsWith('--')) {
+            if (!BOOLEAN_FLAGS.has(arg) && argv[i + 1] && !argv[i + 1].startsWith('--')) {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(arg);
+    }
+    return out;
+}
+
+function parseFactPath(path: string): { namespace: string; key: string } {
+    const slash = path.indexOf('/');
+    if (slash <= 0 || slash === path.length - 1) {
+        throw new Error(`Fact path must look like namespace/key (got '${path}')`);
+    }
+    return {
+        namespace: path.slice(0, slash),
+        key: path.slice(slash + 1)
+    };
+}
+
+async function resolvePerson(argv: string[]): Promise<string> {
+    const flagged = parseFlag(argv, '--person');
+    if (flagged) return flagged;
+    const active = await getActiveLocalApiKey();
+    if (active?.person) return active.person;
+    return 'local';
+}
+
+/** Current CLI identity — must have an enabled person key. */
+async function requireContextPerson(argv?: string[]): Promise<string> {
+    const flagged = argv ? parseFlag(argv, '--person') : undefined;
+    if (flagged) return flagged;
+    const active = await getActiveLocalApiKey();
+    if (active?.person) return active.person;
+    throw new Error(
+        'No active person. Create one (uni init … --person you) or switch: uni use <person>'
+    );
+}
+
+/** Actor for owner actions (approve/suspend). Prefer --by override, else context. */
+async function requireActor(argv: string[]): Promise<string> {
+    const by = parseFlag(argv, '--by');
+    if (by) return by;
+    const active = await getActiveLocalApiKey();
+    if (active?.person) return active.person;
+    throw new Error(
+        'No active person. Switch to the owner: uni use <owner>'
+    );
+}
+
+/** Suspend / key-off blocks local CLI writes for that person (same as API auth). */
+async function assertPersonAccess(person: string): Promise<void> {
+    const key = await getApiKeyByPerson(person);
+    if (key && !key.enabled) {
+        throw new Error(
+            `Person '${person}' is suspended (access OFF). Owner restores with: uni approve <Registry> ${person}`
+        );
+    }
+}
+
+async function whoamiCommand() {
     try {
-        const status = await getSyncStatus();
-        const sync = await getSyncConfig();
-        const registries = await listRegistries();
-        console.log('Upstream status:');
-        console.log(`  Enabled: ${status.enabled}`);
-        console.log(`  Upstream URL: ${status.upstreamUrl || 'Not configured'}`);
-        console.log(`  Person: ${sync.person || 'none'}`);
-        console.log(`  Local Facts: ${status.localFacts}`);
-        console.log(`  Review Queue: ${status.reviewQueue}`);
-        console.log(`  Registries: ${registries.length ? registries.map(r => r.name).join(', ') : '(none — uni init <Name> --person you)'}`);
+        const active = await getActiveLocalApiKey();
+        if (!active) {
+            console.log('No active person. uni init <Registry> --person you');
+            return;
+        }
+        console.log(`You are: ${active.person}`);
+        console.log(`  Access: ${active.enabled ? 'on' : 'off'}`);
+        console.log(`  Namespaces: ${active.namespaces.join(', ') || '(none)'}`);
+        console.log('Switch: uni use <person>');
     } catch (error) {
         console.error('Error:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
 }
 
+async function useCommand(argv: string[]) {
+    const person = argv[0] || parseFlag(argv, '--person');
+    if (!person) {
+        console.error('Usage: uni use <person> [--new]');
+        process.exit(1);
+    }
+    try {
+        if (hasFlag(argv, '--new')) {
+            await ensureLocalPersonKey(person);
+        }
+        const key = await usePerson(person);
+        console.log(`Now acting as: ${key.person}`);
+        console.log('(Auth = this person name + key secret. Role comes from org membership.)');
+    } catch (error) {
+        console.error('Use failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function statusCommand() {
+    try {
+        const status = await getSyncStatus();
+        const sync = await getSyncConfig();
+        const registries = await listRegistries();
+        const proposed = await listFactsByChannels(['proposed']);
+        const review = await listFactsByChannels(['review']);
+        const feedback = await listFactsByChannels(['feedback']);
+        const published = await listFactsByChannels(['published']);
+        const working = await listFactsByChannels(['working']);
+        console.log('Upstream status:');
+        console.log(`  Enabled: ${status.enabled}`);
+        console.log(`  Upstream URL: ${status.upstreamUrl || 'Not configured'}`);
+        console.log(`  Person: ${sync.person || 'none'}`);
+        console.log(`  Local Facts: ${status.localFacts}`);
+        console.log(`  Proposed: ${proposed.length}`);
+        console.log(`  Review: ${review.length}`);
+        console.log(`  Feedback: ${feedback.length}`);
+        console.log(`  Published: ${published.length}`);
+        if (working.length > 0) {
+            console.log(`  Working (legacy): ${working.length}`);
+        }
+        console.log(`  Registries: ${registries.length ? registries.map(r => r.name).join(', ') : '(none — uni init <Name> --person you)'}`);
+        console.log('');
+        console.log('Local agents see: proposed + review + feedback + published');
+        console.log('Production agents see: published only');
+
+        const sections: Array<[string, typeof proposed]> = [
+            ['Proposed', proposed],
+            ['Review', review],
+            ['Feedback', feedback],
+            ['Published (sample)', published.slice(0, 10)]
+        ];
+        for (const [label, facts] of sections) {
+            if (facts.length === 0) continue;
+            console.log('');
+            console.log(`${label}:`);
+            for (const f of facts.slice(0, 20)) {
+                console.log(`  ${f.namespace}/${f.key}  ${f.value.slice(0, 72)}${f.value.length > 72 ? '…' : ''}`);
+            }
+            if (label.startsWith('Published') && published.length > 10) {
+                console.log(`  …and ${published.length - 10} more`);
+            }
+        }
+        if (working.length > 0) {
+            console.log('');
+            console.log('Working (legacy — prefer uni add → proposed):');
+            for (const f of working.slice(0, 10)) {
+                console.log(`  ${f.namespace}/${f.key}`);
+            }
+        }
+    } catch (error) {
+        console.error('Error:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+/**
+ * uni add "<value>" — local proposed fact (visible to local agents).
+ */
+async function addCommand(argv: string[]) {
+    try {
+        const valueParts = positionalArgs(argv);
+        const value = valueParts.join(' ').trim();
+        if (!value) {
+            console.error('Usage: uni add "<value>" [--key k] [--namespace policy] [--person you]');
+            process.exit(1);
+        }
+
+        const namespaceFlag = parseFlag(argv, '--namespace') || 'policy';
+        const keyFlag = parseFlag(argv, '--key');
+        const person = await resolvePerson(argv);
+        await assertPersonAccess(person);
+
+        const suggested = suggestFactKey(value, namespaceFlag);
+        let key = keyFlag ? sanitizeFactKey(keyFlag) : suggested.key;
+        if (!key) key = `fact_${Date.now().toString(36)}`;
+
+        const existing = await getFactRow(namespaceFlag, key);
+        if (existing && !keyFlag) {
+            key = sanitizeFactKey(`${key}_v2`) || `${key}_2`;
+        }
+
+        const result = await upsertFact(namespaceFlag, key, {
+            value,
+            description: 'Added via uni add',
+            fact_type: 'entity_fact',
+            derivation: 'asserted',
+            source: 'uni-cli',
+            created_by: person,
+            approval_status: 'pending',
+            registry_channel: 'proposed',
+            actionability: 'informational',
+            priority: 'normal',
+            change_reason: 'uni add',
+            _event: 'propose'
+        });
+
+        const fact = result.fact;
+        console.log(`Added ${fact.namespace}/${fact.key}`);
+        console.log(`  channel: ${fact.registry_channel}`);
+        console.log(`  value:   ${fact.value}`);
+        if (!keyFlag) {
+            console.log(`  key:     suggested (override with --key)`);
+        }
+        console.log('');
+        console.log('Local agents can use this. Production needs:');
+        console.log(`  uni publish ${fact.namespace}/${fact.key}`);
+        console.log(`  uni feedback ${fact.namespace}/${fact.key}   # or open for comments`);
+    } catch (error) {
+        console.error('Add failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function resolveFactTargets(
+    argv: string[],
+    channels: string[]
+): Promise<Array<{ namespace: string; key: string }>> {
+    const all = hasFlag(argv, '--all');
+    const paths = positionalArgs(argv);
+    if (all) {
+        const facts = await listFactsByChannels(channels);
+        return facts.map((f) => ({ namespace: f.namespace, key: f.key }));
+    }
+    if (paths.length === 0) {
+        throw new Error('Provide <namespace/key> or --all');
+    }
+    return paths.map(parseFactPath);
+}
+
+/** Channels uni publish may promote (solo can publish proposed directly). */
+async function publishSourceChannels(): Promise<string[]> {
+    const person = await resolvePerson([]);
+    const ctx = await getPushCollaborationContext(person);
+    if (ctx.solo) {
+        return ['proposed', 'review', 'feedback', 'working'];
+    }
+    // Multi-user: two-step — only review/feedback → published
+    return ['review', 'feedback'];
+}
+
+/** uni publish <path>|--all — owner marks production truth. */
+async function publishCommand(argv: string[]) {
+    try {
+        const person = await resolvePerson(argv);
+        await assertPersonAccess(person);
+        const allowed = await publishSourceChannels();
+        const targets = await resolveFactTargets(argv, allowed);
+        if (targets.length === 0) {
+            console.log(
+                `Nothing to publish (need channel: ${allowed.join(' | ')}).`
+            );
+            console.log('Multi-user: uni push first (→ feedback/review), then uni publish.');
+            return;
+        }
+        const ctx = await getPushCollaborationContext(person);
+        for (const { namespace, key } of targets) {
+            const existing = await getFactRow(namespace, key);
+            if (!existing) {
+                console.error(`Fact not found: ${namespace}/${key}`);
+                process.exit(1);
+            }
+            if (!allowed.includes(existing.registry_channel)) {
+                console.error(
+                    `Cannot publish ${namespace}/${key} from channel '${existing.registry_channel}'.`
+                );
+                if (!ctx.solo) {
+                    console.error(
+                        'Multi-user: only review or feedback can be published. Push first, then publish.'
+                    );
+                } else {
+                    console.error(`Allowed sources: ${allowed.join(', ')}`);
+                }
+                process.exit(1);
+            }
+            const result = await publishFact(namespace, key, {
+                published_by: person,
+                approved_by: person,
+                change_reason: 'uni publish'
+            });
+            console.log(`Published ${result.fact.namespace}/${result.fact.key}`);
+        }
+    } catch (error) {
+        console.error('Publish failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+/** uni feedback <path>|--all — owner opens for comments (not production). */
+async function feedbackCommand(argv: string[]) {
+    try {
+        const person = await resolvePerson(argv);
+        await assertPersonAccess(person);
+        const all = hasFlag(argv, '--all');
+        const paths = positionalArgs(argv);
+        let targets: Array<{ namespace: string; key: string }> = [];
+        if (all) {
+            const facts = await listFactsByChannels([
+                'proposed',
+                'review',
+                'feedback',
+                'working'
+            ]);
+            targets = facts.map((f) => ({ namespace: f.namespace, key: f.key }));
+        } else if (paths.length >= 1) {
+            targets = paths.map(parseFactPath);
+        } else {
+            throw new Error('Provide <namespace/key> or --all');
+        }
+        if (targets.length === 0) {
+            console.log('Nothing to open for feedback.');
+            return;
+        }
+        for (const { namespace, key } of targets) {
+            const existing = await getFactRow(namespace, key);
+            if (!existing) {
+                console.error(`Fact not found: ${namespace}/${key}`);
+                process.exit(1);
+            }
+            const result = await feedbackFact(namespace, key, {
+                published_by: person,
+                approved_by: person,
+                change_reason: 'uni feedback'
+            });
+            console.log(`Feedback ${result.fact.namespace}/${result.fact.key} (channel=feedback)`);
+        }
+    } catch (error) {
+        console.error('Feedback failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+/**
+ * Legacy commit — prefer uni publish / uni feedback.
+ * commit --publish → publish; otherwise working → proposed.
+ */
+async function commitCommand(argv: string[]) {
+    if (hasFlag(argv, '--publish')) {
+        const next = argv.filter((a) => a !== '--publish');
+        return publishCommand(next);
+    }
+    try {
+        const person = await resolvePerson(argv);
+        const all = hasFlag(argv, '--all');
+        const paths = positionalArgs(argv);
+        let targets: Array<{ namespace: string; key: string }> = [];
+        if (all) {
+            const facts = await listFactsByChannels(['working']);
+            targets = facts.map((f) => ({ namespace: f.namespace, key: f.key }));
+            if (targets.length === 0) {
+                console.log('No legacy working facts. Use: uni add "..." then uni publish …');
+                return;
+            }
+        } else if (paths.length >= 1) {
+            targets = paths.map(parseFactPath);
+        } else {
+            console.error('Usage: uni publish <namespace/key> | uni feedback <namespace/key>');
+            console.error('(uni commit is legacy; uni commit --publish aliases publish)');
+            process.exit(1);
+        }
+
+        for (const { namespace, key } of targets) {
+            const existing = await getFactRow(namespace, key);
+            if (!existing) {
+                console.error(`Fact not found: ${namespace}/${key}`);
+                process.exit(1);
+            }
+            const result = await upsertFact(namespace, key, {
+                value: existing.value,
+                description: existing.description,
+                fact_type: existing.fact_type,
+                derivation: existing.derivation,
+                source: existing.source,
+                created_by: existing.created_by,
+                approval_status: 'pending',
+                registry_channel: 'proposed',
+                actionability: existing.actionability,
+                priority: existing.priority,
+                change_reason: 'uni commit',
+                _event: 'propose'
+            });
+            console.log(`Committed ${result.fact.namespace}/${result.fact.key} → proposed (by ${person})`);
+        }
+    } catch (error) {
+        console.error('Commit failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
 async function initCommand(argv: string[]) {
     const name = argv[0];
-    const person = parseFlag(argv, '--person');
     const gitUrl = parseFlag(argv, '--git-url');
-    if (!name || !person) {
-        console.error('Usage: uni init <Registry> --person <you> [--git-url <url>]');
+    let person = parseFlag(argv, '--person');
+    if (!name) {
+        console.error('Usage: uni init <Registry> [--person you] [--git-url <url>]');
         process.exit(1);
+    }
+    if (!person) {
+        try {
+            person = await requireContextPerson();
+        } catch {
+            console.error('Usage: uni init <Registry> --person <you> [--git-url <url>]');
+            console.error('(No active person yet — pass --person for the first init.)');
+            process.exit(1);
+        }
     }
     try {
         const result = await initRegistry({ name, person, git_url: gitUrl });
         console.log(`Initialized registry '${result.registry.name}'`);
         console.log(`  Owner: ${result.registry.owner_person}`);
         console.log(`  Key:   ${result.key.api_key} (ON)`);
+        console.log(`  Namespaces: ${result.key.namespaces.join(', ')}`);
         if (result.registry.git_url) console.log(`  Git:   ${result.registry.git_url}`);
-        console.log('You own this registry. Others: uni join ' + result.registry.name + ' --person <name>');
+        if (result.remote?.pushed) {
+            console.log('  Origin: org + owner key registered (local and remote match)');
+        } else if (result.remote?.attempted) {
+            console.log(
+                `  Origin: not synced (${result.remote.status || ''} ${result.remote.detail || ''})`.trim()
+            );
+            console.log('  Deploy latest UniFact on origin for public org create, or fix person/key conflict.');
+        } else if (result.remote?.detail) {
+            console.log(`  Origin: skipped — ${result.remote.detail}`);
+        }
+        console.log('Auth: person name + key secret (like user id + password). Role: owner.');
+        console.log(`Others: uni use <them> && uni join ${result.registry.name}`);
     } catch (error) {
         console.error('Init failed:', error instanceof Error ? error.message : String(error));
         process.exit(1);
@@ -133,12 +594,13 @@ async function initCommand(argv: string[]) {
 
 async function joinCommand(argv: string[]) {
     const target = argv[0];
-    const person = parseFlag(argv, '--person');
-    if (!target || !person) {
-        console.error('Usage: uni join <Registry|host/Registry> --person <you>');
+    if (!target) {
+        console.error('Usage: uni join <Registry|host/Registry>');
+        console.error('Joins as your active person (uni whoami / uni use <person>).');
         process.exit(1);
     }
     try {
+        const person = await requireContextPerson(argv);
         const { host, registry } = parseJoinTarget(target);
         if (host) {
             const upstream = `http://${host}`;
@@ -162,15 +624,16 @@ async function joinCommand(argv: string[]) {
                 process.exit(1);
             }
             const body = (await response.json()) as { request: { status: string } };
-            console.log(`Join request for '${registry}' on ${host}: ${body.request.status}`);
-            console.log('Wait for the owner to: uni approve ' + registry + ' --person ' + person + ' --by <owner>');
+            console.log(`Join request for '${registry}' on ${host} as ${person}: ${body.request.status}`);
+            console.log('Owner (on that host): uni approve ' + registry + ' ' + person);
+            console.log('Then install the printed key: uni key create --person ' + person + ' --api-key <printed>');
             return;
         }
 
         const request = await requestJoin({ registry, person });
-        console.log(`Join request for '${registry}': ${request.status}`);
+        console.log(`Join request for '${registry}' as ${person}: ${request.status}`);
         if (request.status === 'pending') {
-            console.log('Owner must approve: uni approve ' + registry + ' --person ' + person + ' --by <owner>');
+            console.log('Owner: uni approve ' + registry + ' ' + person);
         }
     } catch (error) {
         console.error('Join failed:', error instanceof Error ? error.message : String(error));
@@ -178,29 +641,95 @@ async function joinCommand(argv: string[]) {
     }
 }
 
+async function resolveApproveMember(registry: string, argv: string[]): Promise<string> {
+    const flagged = parseFlag(argv, '--person');
+    const positional = positionalArgs(argv).slice(1); // argv[0] is registry
+    if (flagged) return flagged;
+    if (positional[0]) return positional[0];
+
+    const team = await getTeam(registry);
+    const pending = team.members.filter((m) => m.status === 'pending');
+    if (pending.length === 1) return pending[0].person;
+    if (pending.length === 0) {
+        throw new Error(`No pending join requests on '${registry}'. Usage: uni approve ${registry} <member>`);
+    }
+    throw new Error(
+        `Multiple pending joins on '${registry}': ${pending.map((p) => p.person).join(', ')}. ` +
+            `Usage: uni approve ${registry} <member>`
+    );
+}
+
 async function approveCommand(argv: string[]) {
     const registry = argv[0];
-    const person = parseFlag(argv, '--person');
-    const by = parseFlag(argv, '--by');
-    if (!registry || !person || !by) {
-        console.error('Usage: uni approve <Registry> --person <member> --by <owner>');
+    if (!registry) {
+        console.error('Usage: uni approve <Registry> [member]');
+        console.error('You (active person) must be the owner. Member from arg, or the only pending request.');
         process.exit(1);
     }
     try {
+        const by = await requireActor(argv);
+        const person = await resolveApproveMember(registry, argv);
         const result = await approveJoin({
             registry,
             person,
             approved_by: by,
             pull: hasFlag(argv, '--pull')
         });
-        console.log(`Approved '${person}' on registry '${registry}'`);
+        console.log(`Approved '${person}' on registry '${registry}' (by ${by})`);
         console.log(`  Key: ${result.key.api_key} (ON)`);
-        if (result.pull) {
-            console.log(`  Pull: pulled=${result.pull.pulled} skipped=${result.pull.skipped}`);
+        console.log(`  Namespaces: ${result.key.namespaces.join(', ')}`);
+        if (result.remote?.pushed) {
+            console.log('  Origin: member key pushed (write access on upstream)');
+        } else if (result.remote?.attempted) {
+            console.log(
+                `  Origin: key push failed (${result.remote.status || ''} ${result.remote.detail || ''})`.trim()
+            );
+        } else if (result.remote?.detail) {
+            console.log(`  Origin: skipped — ${result.remote.detail}`);
         }
-        console.log('Share the key with the member (or they pull after syncing keys).');
+        if (result.pull) {
+            console.log(`  Facts pull: pulled=${result.pull.pulled} skipped=${result.pull.skipped}`);
+        }
+        console.log('Keys are push-only (never pulled). Member can uni push with this same key.');
+        console.log(`Pause later: uni suspend ${registry} ${person}`);
+        await usePerson(by);
     } catch (error) {
         console.error('Approve failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function suspendCommand(argv: string[]) {
+    const registry = argv[0];
+    const flagged = parseFlag(argv, '--person');
+    const positional = positionalArgs(argv).slice(1);
+    const person = flagged || positional[0];
+    if (!registry || !person) {
+        console.error('Usage: uni suspend <Registry> <member>');
+        console.error('You (active person) must be the owner.');
+        process.exit(1);
+    }
+    try {
+        const by = await requireActor(argv);
+        const result = await suspendJoin({
+            registry,
+            person,
+            suspended_by: by
+        });
+        console.log(`Suspended '${person}' on registry '${registry}' (by ${by})`);
+        console.log(`  Membership: ${result.request.status}`);
+        console.log(`  Access: OFF (person key disabled)`);
+        if (result.remote?.pushed) {
+            console.log('  Origin: member key turned OFF on upstream');
+        } else if (result.remote?.attempted && !result.remote.pushed) {
+            console.log(
+                `  Origin: key push failed (${result.remote.status || ''} ${result.remote.detail || ''})`.trim()
+            );
+        }
+        console.log(`Restore: uni approve ${registry} ${person}`);
+        await usePerson(by);
+    } catch (error) {
+        console.error('Suspend failed:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
 }
@@ -221,17 +750,71 @@ async function registriesCommand() {
     }
 }
 
+async function teamCommand(argv: string[]) {
+    try {
+        const name = argv[0];
+        if (!name) {
+            const registries = await listRegistries();
+            if (registries.length === 0) {
+                console.log('No registries. Create one: uni init Unifact --person you');
+                return;
+            }
+            if (registries.length === 1) {
+                await printTeam(registries[0].name);
+                return;
+            }
+            console.log('Usage: uni team <Registry>');
+            console.log('Registries:');
+            for (const r of registries) {
+                console.log(`  ${r.name}  owner=${r.owner_person}`);
+            }
+            return;
+        }
+        await printTeam(name);
+    } catch (error) {
+        console.error('Team failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function printTeam(registryName: string) {
+    const team = await getTeam(registryName);
+    console.log(`Team: ${team.registry}  (owner=${team.owner})`);
+    console.log('');
+    console.log('Status     Access  Person');
+    for (const m of team.members) {
+        const status = m.status === 'owner' ? 'owner' : m.status;
+        console.log(`${status.padEnd(10)} ${m.access.padEnd(6)}  ${m.person}`);
+    }
+    const pending = team.members.filter((m) => m.status === 'pending');
+    if (pending.length > 0) {
+        console.log('');
+        console.log('Pending join requests — approve with:');
+        for (const p of pending) {
+            console.log(`  uni use ${team.owner}`);
+            console.log(`  uni approve ${team.registry} ${p.person}`);
+        }
+    }
+}
+
 async function requestsCommand(argv: string[]) {
     try {
         const registry = argv[0];
-        const requests = await listJoinRequests(registry);
+        if (registry) {
+            // Prefer the richer team view when a registry is named.
+            await printTeam(registry);
+            return;
+        }
+        const requests = await listJoinRequests();
         if (requests.length === 0) {
-            console.log('No join requests.');
+            console.log('No join requests. Try: uni team <Registry>');
             return;
         }
         for (const r of requests) {
-            console.log(`${r.status.padEnd(8)}  ${r.registry_name}  ${r.person}`);
+            console.log(`${r.status.padEnd(10)}  ${r.registry_name}  ${r.person}`);
         }
+        console.log('');
+        console.log('Tip: uni team <Registry> shows owner + members + requests together.');
     } catch (error) {
         console.error('Error:', error instanceof Error ? error.message : String(error));
         process.exit(1);
@@ -240,6 +823,8 @@ async function requestsCommand(argv: string[]) {
 
 async function pullCommand(namespaces: string[]) {
     try {
+        const sync = await getSyncConfig();
+        if (sync.person) await assertPersonAccess(sync.person);
         console.log('Pulling published facts from origin...');
         const result = await pullFactsFromRemote(namespaces.length > 0 ? namespaces : undefined);
         console.log(`Pull complete: pulled=${result.pulled} skipped=${result.skipped} conflicts=${result.conflicts}`);
@@ -252,13 +837,34 @@ async function pullCommand(namespaces: string[]) {
     }
 }
 
-async function pushCommand(namespaces: string[]) {
+async function pushCommand(selectors: string[]) {
     try {
-        console.log('Pushing proposed facts to origin...');
-        const result = await pushFactsToRemote(namespaces.length > 0 ? namespaces : undefined);
+        const sync = await getSyncConfig();
+        if (sync.person) await assertPersonAccess(sync.person);
+        for (const token of selectors) {
+            parsePushSelector(token);
+        }
+        console.log(
+            selectors.length > 0
+                ? `Pushing to origin (selectors: ${selectors.join(', ')})...`
+                : 'Pushing to origin (all local namespaces you can write)...'
+        );
+        const result = await pushFactsToRemote(selectors.length > 0 ? selectors : undefined);
         console.log(`Push complete: pushed=${result.pushed} failed=${result.failed}`);
         for (const fact of result.facts) {
-            console.log(`  - ${fact.namespace}/${fact.key}`);
+            console.log(`  - [${fact.registry_channel}] ${fact.namespace}/${fact.key}`);
+        }
+        if (result.pushed === 0 && result.failed === 0) {
+            console.log(
+                'Nothing to push (no matching facts in allowed namespaces, or join/approve not done).'
+            );
+        }
+        if (result.failed > 0) {
+            console.log('');
+            console.log('Hint: 403 usually means origin write scopes are missing.');
+            console.log('  1) uni use <you> && uni join <host>/<Registry>');
+            console.log('  2) owner: uni use <owner> && uni approve <Registry> <you>');
+            console.log('  3) install the printed key locally, then retry uni push');
         }
     } catch (error) {
         console.error('Push failed:', error instanceof Error ? error.message : String(error));
@@ -287,31 +893,47 @@ async function keyCommand(argv: string[]) {
             const person = parseFlag(argv, '--person');
             if (!person) {
                 console.error(`Usage: uni key ${sub} --person <name>`);
+                console.error('Prefer: uni approve / uni suspend for membership access.');
                 process.exit(1);
             }
             const key = await setApiKeyEnabled(person, sub === 'on');
             console.log(`${key.person}: ${key.enabled ? 'ON' : 'OFF'} (${key.api_key})`);
+            console.log('(Advanced) Prefer uni approve / uni suspend to manage membership.');
             return;
         }
 
         if (sub === 'create') {
             const person = parseFlag(argv, '--person');
             if (!person) {
-                console.error('Usage: uni key create --person <name> [--namespaces a,b] [--remote]');
+                console.error(
+                    'Usage: uni key create --person <name> [--namespaces a,b] [--api-key uf_…] [--remote]'
+                );
                 process.exit(1);
             }
             const namespacesArg = parseFlag(argv, '--namespaces');
             const namespaces = namespacesArg
-                ? namespacesArg.split(',').map(s => s.trim()).filter(Boolean)
+                ? namespacesArg.split(',').map((s) => s.trim()).filter(Boolean)
                 : ['*'];
+            const apiKeyArg = parseFlag(argv, '--api-key');
             const remote = hasFlag(argv, '--remote');
 
-            let key = await listApiKeys().then(keys => keys.find(k => k.person === person));
+            let key = await listApiKeys().then((keys) => keys.find((k) => k.person === person));
             if (!key) {
-                key = await createApiKey({ person, namespaces });
+                key = await createApiKey({ person, namespaces, api_key: apiKeyArg });
                 console.log(`Local key for ${key.person}: ${key.api_key} (${key.enabled ? 'ON' : 'OFF'})`);
+            } else if (apiKeyArg || namespacesArg) {
+                key = await createApiKey({
+                    person,
+                    namespaces: namespacesArg ? namespaces : key.namespaces,
+                    api_key: apiKeyArg || key.api_key
+                });
+                console.log(
+                    `Updated local key for ${key.person}: ${key.api_key} ns=${key.namespaces.join(',')} (${key.enabled ? 'ON' : 'OFF'})`
+                );
             } else {
-                console.log(`Using existing local key for ${key.person}: ${key.api_key} (${key.enabled ? 'ON' : 'OFF'})`);
+                console.log(
+                    `Using existing local key for ${key.person}: ${key.api_key} (${key.enabled ? 'ON' : 'OFF'})`
+                );
             }
 
             if (remote) {

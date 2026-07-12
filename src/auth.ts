@@ -2,8 +2,9 @@ import { Request, Response, NextFunction } from 'express';
 import { countApiKeys, keyHasAccess } from './keys.js';
 
 /**
- * Auth is DB-only: one API key per person in `api_keys`, toggle with enabled.
- * No master key and no UNIFACT_API_KEYS env.
+ * Auth is DB-only: one API key per person in `api_keys`.
+ * Person name + key secret ≈ user id + password.
+ * Membership access: uni approve / uni suspend.
  */
 export async function hasAccess(
     apiKey: string | undefined,
@@ -42,5 +43,20 @@ export function requireAuthOrBootstrap(scope: 'read' | 'write') {
             return next();
         }
         return requireAuth(scope)(req, res, next);
+    };
+}
+
+/**
+ * Anyone may create a new org (uni init). Auth optional.
+ * If a key is presented it must be valid; if omitted, the handler creates the owner key.
+ */
+export function allowPublicOrgCreate() {
+    return async (req: Request, res: Response, next: NextFunction) => {
+        const apiKey = (req.headers['x-api-key'] || req.query.key) as string | undefined;
+        if (!apiKey) return next();
+        const ok = await keyHasAccess(apiKey, undefined, 'write');
+        if (ok) return next();
+        // Unknown key is OK for org create — client is registering that secret as the new owner.
+        return next();
     };
 }

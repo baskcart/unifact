@@ -2,9 +2,10 @@ import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import { db, AuditLogRow } from './db.js';
 import { formatFacts, FormatType, FactData } from './format.js';
-import { requireAuth, requireAuthOrBootstrap, hasAccess } from './auth.js';
+import { requireAuth, requireAuthOrBootstrap, allowPublicOrgCreate, hasAccess } from './auth.js';
 import {
     createApiKey,
+    findApiKeyBySecret,
     listApiKeys,
     setApiKeyEnabled
 } from './keys.js';
@@ -14,7 +15,8 @@ import {
     initRegistry,
     listJoinRequests,
     listRegistries,
-    requestJoin
+    requestJoin,
+    suspendJoin
 } from './registry.js';
 import {
     approveFact,
@@ -41,7 +43,8 @@ import {
     searchFacts,
     supersedeFact,
     upsertAgentProfile,
-    upsertFact
+    upsertFact,
+    feedbackFact
 } from './store.js';
 
 const app = express();
@@ -58,17 +61,20 @@ app.get('/healthz', (_req: Request, res: Response) => {
     });
 });
 
-app.get('/v1/keys', requireAuthOrBootstrap('read'), async (_req: Request, res: Response) => {
+app.get('/v1/keys', requireAuthOrBootstrap('read'), async (req: Request, res: Response) => {
     try {
+        const callerKey = getApiKey(req);
+        const caller = callerKey ? await findApiKeyBySecret(callerKey) : undefined;
         const keys = await listApiKeys();
+        // Secrets are not listable remotely — only your own key value is returned.
         return res.json({
-            keys: keys.map(k => ({
+            keys: keys.map((k) => ({
                 person: k.person,
-                api_key: k.api_key,
                 enabled: k.enabled,
                 namespaces: k.namespaces,
                 scopes: k.scopes,
-                updated_at: k.updated_at
+                updated_at: k.updated_at,
+                api_key: caller && caller.person === k.person ? k.api_key : undefined
             })),
             count: keys.length
         });
@@ -88,7 +94,8 @@ app.post('/v1/keys', requireAuthOrBootstrap('write'), async (req: Request, res: 
             ? body.scopes.map(String).filter((s): s is 'read' | 'write' => s === 'read' || s === 'write')
             : undefined;
         const apiKey = typeof body.api_key === 'string' ? body.api_key : undefined;
-        const key = await createApiKey({ person, namespaces, scopes, api_key: apiKey });
+        const enabled = body.enabled === false ? false : true;
+        const key = await createApiKey({ person, namespaces, scopes, api_key: apiKey, enabled });
         console.log(`[unifact] API key upserted for person=${key.person} enabled=${key.enabled}`);
         return res.json({ success: true, key });
     } catch (err) {
@@ -133,16 +140,19 @@ app.get('/v1/registries/:name', requireAuthOrBootstrap('read'), async (req: Requ
     }
 });
 
-app.post('/v1/registries', requireAuthOrBootstrap('write'), async (req: Request, res: Response) => {
+app.post('/v1/registries', allowPublicOrgCreate(), async (req: Request, res: Response) => {
     try {
         const body = bodyAsRecord(req);
         const result = await initRegistry({
             name: String(body.name || ''),
             person: String(body.person || ''),
             description: typeof body.description === 'string' ? body.description : undefined,
-            git_url: typeof body.git_url === 'string' ? body.git_url : undefined
+            git_url: typeof body.git_url === 'string' ? body.git_url : undefined,
+            api_key: typeof body.api_key === 'string' ? body.api_key : undefined,
+            // Origin must not recurse into its own upstream when mirroring.
+            syncRemote: false
         });
-        return res.json({ success: true, ...result });
+        return res.json({ success: true, registry: result.registry, key: result.key });
     } catch (err) {
         return handleError(res, err, 'Failed to init registry');
     }
@@ -186,6 +196,20 @@ app.post('/v1/registries/:name/approve', requireAuth('write'), async (req: Reque
         return res.json({ success: true, ...result });
     } catch (err) {
         return handleError(res, err, 'Failed to approve join');
+    }
+});
+
+app.post('/v1/registries/:name/suspend', requireAuth('write'), async (req: Request, res: Response) => {
+    try {
+        const body = bodyAsRecord(req);
+        const result = await suspendJoin({
+            registry: req.params.name,
+            person: String(body.person || ''),
+            suspended_by: String(body.suspended_by || body.approved_by || '')
+        });
+        return res.json({ success: true, ...result });
+    } catch (err) {
+        return handleError(res, err, 'Failed to suspend member');
     }
 });
 
@@ -276,7 +300,8 @@ function sendFormatted(res: Response, facts: FactData[], format: FormatType) {
 function handleError(res: Response, err: unknown, fallback: string) {
     const message = err instanceof Error ? err.message : fallback;
     console.error(err);
-    return res.status(400).json({ error: message });
+    const status = /already exists/i.test(message) ? 409 : 400;
+    return res.status(status).json({ error: message });
 }
 
 async function filterAuthorized<T>(
@@ -567,6 +592,16 @@ app.post('/v1/facts/:namespace/:key/publish', requireAuth('write'), async (req: 
     }
 });
 
+app.post('/v1/facts/:namespace/:key/feedback', requireAuth('write'), async (req: Request, res: Response) => {
+    const { namespace, key } = req.params;
+
+    try {
+        return res.json(await feedbackFact(namespace, key, bodyAsRecord(req)));
+    } catch (err) {
+        return handleError(res, err, 'Failed to open fact for feedback');
+    }
+});
+
 app.post('/v1/facts/:namespace/:key/supersede', requireAuth('write'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
@@ -742,10 +777,15 @@ app.post('/v1/sync/pull', requireAuth('write'), async (req: Request, res: Respon
 });
 
 app.post('/v1/sync/push', requireAuth('write'), async (req: Request, res: Response) => {
-    const { namespaces } = req.body;
+    const body = bodyAsRecord(req);
+    const selectors = Array.isArray(body.selectors)
+        ? body.selectors.map(String)
+        : Array.isArray(body.namespaces)
+          ? body.namespaces.map(String)
+          : undefined;
 
     try {
-        const result = await pushFactsToRemote(namespaces);
+        const result = await pushFactsToRemote(selectors);
         console.log(`[unifact] Upstream push: ${result.pushed} pushed, ${result.failed} failed`);
         return res.json(result);
     } catch (err) {

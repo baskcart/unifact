@@ -1,17 +1,30 @@
 export const FACT_REGISTRY_CHANNELS = [
-    'working',
+    'working', // legacy; prefer proposed for local staging
     'proposed',
     'review',
+    'feedback',
     'published',
     'superseded',
     'retracted'
 ] as const;
+
+/** Channels local/dev agents may use (not production-only). */
+export const LOCAL_AGENT_CHANNELS = [
+    'proposed',
+    'review',
+    'feedback',
+    'published'
+] as const;
+
+/** Production / shared agents — agreed truth only. */
+export const PRODUCTION_AGENT_CHANNELS = ['published'] as const;
 
 export const FACT_VERSION_EVENTS = [
     'create',
     'update',
     'propose',
     'review',
+    'feedback',
     'publish',
     'supersede',
     'retract',

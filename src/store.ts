@@ -9,6 +9,7 @@ import {
     FACT_VERSION_EVENTS,
     FACT_STATUSES,
     FACT_TYPES,
+    LOCAL_AGENT_CHANNELS,
     FactResponse,
     FactVersionResponse,
     hasOwn,
@@ -26,6 +27,7 @@ import {
     serializeValue
 } from './model.js';
 import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
+import { apiKeyAllowsNamespace, findApiKeyBySecret, listApiKeys } from './keys.js';
 
 export const FACT_SELECT_COLUMNS = `
   rowid, namespace, key, value, description, fact_type, subject, scope, status,
@@ -119,6 +121,8 @@ export interface RelevantFactQuery {
     query?: string;
     registry_channel?: string;
     published_only?: boolean;
+    /** When true, include proposed/review/feedback/published (local/dev agents). */
+    local_agent?: boolean;
 }
 
 export interface RelevantFactResult {
@@ -195,7 +199,7 @@ function buildFactColumns(input: InputRecord, existing?: FactRow): FactColumns {
             : existing?.approval_status ?? 'unreviewed',
         registry_channel: hasOwn(input, 'registry_channel')
             ? normalizeEnumValue(input.registry_channel, FACT_REGISTRY_CHANNELS, 'registry_channel')
-            : existing?.registry_channel ?? (input.approval_status === 'approved' ? 'published' : 'working'),
+            : existing?.registry_channel ?? (input.approval_status === 'approved' ? 'published' : 'proposed'),
         published_at: maybeTimestamp(input, 'published_at', existing?.published_at),
         published_by: maybeString(input, 'published_by', existing?.published_by),
         change_reason: maybeString(input, 'change_reason', existing?.change_reason),
@@ -305,6 +309,27 @@ export async function listFacts(namespace: string): Promise<FactRow[]> {
       WHERE namespace = ?
       ORDER BY key
     `, [namespace]);
+}
+
+export async function listFactNamespaces(): Promise<string[]> {
+    const rows = await db.all<{ namespace: string }>(`
+      SELECT DISTINCT namespace
+      FROM facts
+      ORDER BY namespace
+    `);
+    return rows.map((row) => row.namespace);
+}
+
+export async function listFactsByChannels(channels: string[]): Promise<FactResponse[]> {
+    if (channels.length === 0) return [];
+    const placeholders = channels.map(() => '?').join(', ');
+    const rows = await db.all<FactRow>(`
+      SELECT ${FACT_SELECT_COLUMNS}
+      FROM facts
+      WHERE registry_channel IN (${placeholders})
+      ORDER BY namespace, key
+    `, channels);
+    return rows.map(factFromRow);
 }
 
 export async function searchFacts(query: string): Promise<FactRow[]> {
@@ -822,11 +847,15 @@ export async function findRelevantFacts(query: RelevantFactQuery): Promise<{ pro
         clauses.push('actionability = ?');
         params.push(normalizeEnumValue(query.actionability, FACT_ACTIONABILITIES, 'actionability'));
     }
-    if (query.published_only) {
-        clauses.push("registry_channel = 'published'");
-    } else if (query.registry_channel) {
+    if (query.registry_channel) {
         clauses.push('registry_channel = ?');
         params.push(normalizeEnumValue(query.registry_channel, FACT_REGISTRY_CHANNELS, 'registry_channel'));
+    } else if (query.local_agent) {
+        const placeholders = LOCAL_AGENT_CHANNELS.map(() => '?').join(', ');
+        clauses.push(`registry_channel IN (${placeholders})`);
+        params.push(...LOCAL_AGENT_CHANNELS);
+    } else if (query.published_only) {
+        clauses.push("registry_channel = 'published'");
     }
 
     if (query.status) {
@@ -967,6 +996,24 @@ export async function publishFact(namespace: string, key: string, input: InputRe
     });
 }
 
+/** Owner opens a fact for shared comments — visible to local agents, not production truth. */
+export async function feedbackFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+    const actor = normalizeNullableString(
+        input.published_by ?? input.approved_by ?? input.reviewed_by ?? input.created_by,
+        'published_by'
+    );
+
+    return transitionFact(namespace, key, {
+        ...input,
+        registry_channel: 'feedback',
+        status: 'needs_review',
+        approval_status: 'pending',
+        approved_by: actor,
+        change_reason: hasOwn(input, 'change_reason') ? input.change_reason : 'Opened for feedback',
+        _event: 'feedback'
+    });
+}
+
 export async function retractFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     return transitionFact(namespace, key, {
         ...input,
@@ -990,6 +1037,14 @@ export async function supersedeFact(namespace: string, key: string, input: Input
 }
 
 export async function pullFactsForAgent(query: RelevantFactQuery): Promise<{ profile: AgentProfileResponse | null; results: RelevantFactResult[]; count: number }> {
+    // Production default: published only. Pass local_agent: true for local/dev agents.
+    if (query.local_agent) {
+        return findRelevantFacts({
+            ...query,
+            local_agent: true,
+            published_only: false
+        });
+    }
     return findRelevantFacts({
         ...query,
         published_only: query.published_only ?? true
@@ -1024,7 +1079,7 @@ export interface RegistryMetadata {
 }
 
 export async function listReviewQueue(query: ReviewQueueQuery = {}): Promise<ReviewQueueResult> {
-    const clauses = ["registry_channel IN ('proposed', 'review')"];
+    const clauses = ["registry_channel IN ('proposed', 'review', 'feedback')"];
     const params: unknown[] = [];
 
     if (query.namespace) {
@@ -1134,6 +1189,50 @@ export interface SyncPushResult {
     facts: FactResponse[];
 }
 
+export type PushSelector =
+    | { kind: 'namespace'; namespace: string }
+    | { kind: 'exact'; namespace: string; key: string }
+    | { kind: 'glob'; namespace: string; keyGlob: string };
+
+/** Parse `policy`, `policy/feeling_talk`, or `policy/feeling_*`. */
+export function parsePushSelector(token: string): PushSelector {
+    const raw = token.trim();
+    if (!raw) {
+        throw new Error('Empty push selector');
+    }
+    const slash = raw.indexOf('/');
+    if (slash === -1) {
+        return { kind: 'namespace', namespace: raw };
+    }
+    const namespace = raw.slice(0, slash);
+    const keyPart = raw.slice(slash + 1);
+    if (!namespace || !keyPart) {
+        throw new Error(`Invalid push selector '${raw}' (use namespace, namespace/key, or namespace/pattern*)`);
+    }
+    if (keyPart.includes('*') || keyPart.includes('?')) {
+        return { kind: 'glob', namespace, keyGlob: keyPart };
+    }
+    return { kind: 'exact', namespace, key: keyPart };
+}
+
+function keyMatchesGlob(key: string, glob: string): boolean {
+    const escaped = glob
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*')
+        .replace(/\?/g, '.');
+    return new RegExp(`^${escaped}$`).test(key);
+}
+
+function factMatchesSelector(
+    fact: { namespace: string; key: string },
+    selector: PushSelector
+): boolean {
+    if (fact.namespace !== selector.namespace) return false;
+    if (selector.kind === 'namespace') return true;
+    if (selector.kind === 'exact') return fact.key === selector.key;
+    return keyMatchesGlob(fact.key, selector.keyGlob);
+}
+
 export interface SyncStatusResult {
     enabled: boolean;
     upstreamUrl: string | null;
@@ -1146,6 +1245,10 @@ export interface SyncStatusResult {
     lastSync: number | null;
 }
 
+/**
+ * Pull published facts from origin.
+ * Never pulls API keys — membership keys are push-only (via uni approve / uni suspend).
+ */
 export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPullResult> {
     const config = await getSyncConfig();
     if (!config.enabled || !config.upstreamUrl || !config.apiKey) {
@@ -1212,7 +1315,71 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
     }
 }
 
-export async function pushFactsToRemote(namespaces?: string[]): Promise<SyncPushResult> {
+export interface PushCollaborationContext {
+    solo: boolean;
+    isOwner: boolean;
+    person: string | null;
+    memberCount: number;
+    registryName: string | null;
+}
+
+/** Solo = at most one enabled person key. Owner = matches primary registry owner_person. */
+export async function getPushCollaborationContext(
+    person: string | null
+): Promise<PushCollaborationContext> {
+    const keys = await listApiKeys();
+    const members = new Set(keys.filter((k) => k.enabled).map((k) => k.person));
+    if (person) members.add(person);
+    const memberCount = members.size;
+
+    const registry = await db.get<{ name: string; owner_person: string }>(`
+      SELECT name, owner_person FROM registries ORDER BY created_at ASC LIMIT 1
+    `);
+
+    const isOwner = registry ? !person || registry.owner_person === person : true;
+
+    return {
+        solo: memberCount <= 1,
+        isOwner,
+        person,
+        memberCount,
+        registryName: registry?.name ?? null
+    };
+}
+
+function remoteChannelForPush(
+    localChannel: string,
+    ctx: PushCollaborationContext
+): 'proposed' | 'review' | 'feedback' | 'published' {
+    if (ctx.solo) {
+        // Single-user registry: sync channel as-is (working → proposed).
+        if (localChannel === 'working') return 'proposed';
+        if (localChannel === 'published') return 'published';
+        if (localChannel === 'feedback') return 'feedback';
+        if (localChannel === 'review') return 'review';
+        return 'proposed';
+    }
+
+    // Multi-user: push is never a direct remote publish.
+    // Owner → feedback (owner reviews, then uni publish). Others → review.
+    if (localChannel === 'published') {
+        // Re-syncing already-published truth keeps published.
+        return 'published';
+    }
+    if (!ctx.isOwner) {
+        return 'review';
+    }
+    if (localChannel === 'review') return 'review';
+    if (localChannel === 'feedback') return 'feedback';
+    return 'feedback';
+}
+
+/**
+ * Push local facts upstream.
+ * @param selectors - tokens like `policy`, `policy/feeling_talk`, `policy/feeling_*`.
+ *   Empty / omitted = all local namespaces allowed by the active API key.
+ */
+export async function pushFactsToRemote(selectors?: string[]): Promise<SyncPushResult> {
     const config = await getSyncConfig();
     if (!config.enabled || !config.upstreamUrl || !config.apiKey) {
         throw new Error('Upstream registry not configured. Set company.infrastructure/upstream-registry-url and create an enabled API key (uni key create --person you).');
@@ -1224,41 +1391,92 @@ export async function pushFactsToRemote(namespaces?: string[]): Promise<SyncPush
     }
 
     try {
-        const targetNamespaces = namespaces || ['company.decisions', 'company.constraints', 'company.branding'];
+        const keyRecord = await findApiKeyBySecret(config.apiKey);
+        const ctx = await getPushCollaborationContext(config.person);
+        const parsed: PushSelector[] =
+            selectors && selectors.length > 0
+                ? selectors.map(parsePushSelector)
+                : (await listFactNamespaces()).map((namespace) => ({
+                      kind: 'namespace' as const,
+                      namespace
+                  }));
+
+        const allowed = parsed.filter((sel) => apiKeyAllowsNamespace(keyRecord, sel.namespace));
+        if (allowed.length === 0) {
+            return { success: true, pushed: 0, failed: 0, facts: [] };
+        }
+
+        const pushableChannels = new Set([
+            'working',
+            'proposed',
+            'review',
+            'feedback',
+            'published'
+        ]);
+
+        const namespaces = [...new Set(allowed.map((s) => s.namespace))];
         let pushed = 0;
         let failed = 0;
         const pushedFacts: FactResponse[] = [];
 
-        for (const namespace of targetNamespaces) {
-            const localFacts = (await listFacts(namespace)).filter(f =>
-                f.registry_channel === 'proposed' || f.registry_channel === 'working'
+        for (const namespace of namespaces) {
+            const nsSelectors = allowed.filter((s) => s.namespace === namespace);
+            const localFacts = (await listFacts(namespace)).filter(
+                (f) =>
+                    pushableChannels.has(f.registry_channel) &&
+                    nsSelectors.some((sel) => factMatchesSelector(f, sel))
             );
 
             for (const fact of localFacts) {
                 try {
-                    const proposed = {
-                        ...factFromRow(fact),
-                        registry_channel: 'proposed',
-                        approval_status: 'pending',
-                        status: fact.status === 'active' ? 'needs_review' : fact.status
-                    };
-                    const response = await fetch(`${remoteUrl}/v1/facts/${fact.namespace}/${fact.key}`, {
-                        method: 'POST',
-                        headers: {
-                            'X-API-Key': config.apiKey,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(proposed)
-                    });
+                    const base = factFromRow(fact);
+                    const remoteChannel = remoteChannelForPush(fact.registry_channel, ctx);
+                    const payload =
+                        remoteChannel === 'published'
+                            ? {
+                                  ...base,
+                                  registry_channel: 'published',
+                                  approval_status: 'approved',
+                                  status: 'active',
+                                  published_by: base.published_by || base.approved_by || base.created_by,
+                                  published_at: base.published_at || Date.now()
+                              }
+                            : {
+                                  ...base,
+                                  registry_channel: remoteChannel,
+                                  approval_status: 'pending',
+                                  status: remoteChannel === 'review' || remoteChannel === 'feedback'
+                                      ? 'needs_review'
+                                      : fact.status === 'active'
+                                        ? 'needs_review'
+                                        : fact.status,
+                                  published_by: null,
+                                  published_at: null
+                              };
+
+                    const response = await fetch(
+                        `${remoteUrl}/v1/facts/${encodeURIComponent(fact.namespace)}/${encodeURIComponent(fact.key)}`,
+                        {
+                            method: 'PUT',
+                            headers: {
+                                'X-API-Key': config.apiKey,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(payload)
+                        }
+                    );
 
                     if (!response.ok) {
-                        console.warn(`Failed to push ${fact.namespace}/${fact.key}: ${response.statusText}`);
+                        const detail = await response.text().catch(() => '');
+                        console.warn(
+                            `Failed to push ${fact.namespace}/${fact.key}: ${response.status} ${response.statusText}${detail ? ` — ${detail.slice(0, 200)}` : ''}`
+                        );
                         failed++;
                         continue;
                     }
 
                     pushed++;
-                    pushedFacts.push(factFromRow(fact));
+                    pushedFacts.push({ ...base, registry_channel: remoteChannel });
                 } catch (error) {
                     console.warn(`Error pushing ${fact.namespace}/${fact.key}:`, error);
                     failed++;
@@ -1283,7 +1501,7 @@ export async function getSyncStatus(): Promise<SyncStatusResult> {
     const reviewQueue = await db.get<{ count: number }>(`
       SELECT COUNT(*) as count
       FROM facts
-      WHERE registry_channel IN ('proposed', 'review')
+      WHERE registry_channel IN ('proposed', 'review', 'feedback')
     `);
 
     return {

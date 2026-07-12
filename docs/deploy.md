@@ -35,11 +35,16 @@ Useful commands after `npm link`:
 ```text
 uni init Unifact --person admin
 uni join Unifact --person alice
-uni approve Unifact --person alice --by admin
+uni approve Unifact --person alice --by admin   # share printed key with alice
+uni suspend Unifact --person alice --by admin   # pause access
+uni approve Unifact --person alice --by admin   # restore (same secret)
 uni pull
 uni push
+uni push policy/feeling_*                      # selective
 ```
 
+Members must use the **approved** key (same secret as origin). A local-only key without write namespaces gets **403** on push.
+Prefer **approve / suspend** for membership; `uni key on|off` is low-level.
 ## Shared origin (PostgreSQL)
 
 For a team registry host, use Postgres:

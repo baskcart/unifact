@@ -10,12 +10,12 @@ UniFact is source control for organizational facts — a **tenanted fact registr
 |-----|---------|
 | Hosting (GitHub) | Host (`staging.unifact.ai` or self-hosted) |
 | Org / repo | **Registry** named by **org** (e.g. `Unifact`) |
-| `git init` / create repo | **`uni registry create <org>`** (planned) |
-| Clone + credentials | Join registry → person API key |
+| `git init` / create repo | **`uni init <Org>`** — create org registry; you become owner |
+| Clone + credentials | **`uni join <Org>`** — request membership; owner **`uni approve`** |
 | `git pull` / `git push` | **`uni pull` / `uni push`** |
 | Branch / PR | Channels: working → proposed → review → **published** |
 
-**First person who creates a registry owns it.** Others **join** that org registry; they do not create a second copy of the same org name.
+**First person who runs `uni init Unifact` owns registry Unifact.** Others **`uni join Unifact`**; the owner approves before they get a key and can pull/push.
 
 Optional: paste a **GitHub/GitLab URL** only to suggest org/repo metadata (`uni meta <url>`). UniFact reads public hosting APIs — it does **not** run `git` and does **not** treat a git repo as the registry itself.
 
@@ -96,15 +96,17 @@ Auth keys are always rows in `api_keys`, never `UNIFACT_MASTER_KEY` / `UNIFACT_A
 - **MCP** — agent tools for propose / search / approve / publish  
 - **`uni` CLI** — status / pull / push / keys  
 
-## Tenant roadmap
+## Tenant registries (implemented)
 
-Intended product shape (partially implemented today):
+```bash
+uni init Unifact --person admin [--git-url https://github.com/org/repo]
+uni join Unifact --person alice
+uni approve Unifact --person alice --by admin
+uni registries
+uni requests Unifact
+```
 
-1. **`uni registry create <org>`** — create tenant registry; creator = owner  
-2. **Join request** — others ask to join `<org>`; owner approves → person key  
-3. Facts and keys scoped to that org registry  
-
-Today on a shared host you still create person keys; explicit **org registry** create/join is next.
+Optional: `uni join staging.unifact.ai/Unifact --person alice` posts the join request to that host.
 
 ## Deploy notes
 

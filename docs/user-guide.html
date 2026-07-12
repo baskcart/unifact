@@ -177,8 +177,9 @@
         A registry has a name — for example <strong>Unifact</strong>.
       </p>
       <ol class="steps">
-        <li><strong>First person creates the registry</strong> for the org and becomes the owner.</li>
-        <li><strong>Others join</strong> that registry (they do not create a second “Unifact”).</li>
+        <li><strong>Owner creates the registry:</strong> <code>uni init Unifact --person admin</code></li>
+        <li><strong>Others request to join:</strong> <code>uni join Unifact --person alice</code></li>
+        <li><strong>Owner approves:</strong> <code>uni approve Unifact --person alice --by admin</code></li>
         <li>Each person gets <strong>one API key</strong> that can be turned <strong>on</strong> or <strong>off</strong>.</li>
         <li>People and AI assistants use that key to read published facts and propose new ones.</li>
       </ol>
@@ -231,6 +232,14 @@
 
     <section>
       <h2>Everyday actions</h2>
+      <h3>Create or join a registry</h3>
+      <pre>uni init Unifact --person admin
+uni join Unifact --person alice
+uni approve Unifact --person alice --by admin
+uni registries
+uni requests Unifact</pre>
+      <p class="muted"><code>init</code> is like starting a new org workspace. <code>join</code> asks to become a member; the owner must approve.</p>
+
       <h3>Check your connection</h3>
       <pre>uni status</pre>
       <p class="muted">Shows whether you are linked to the shared registry and which person key is active.</p>
@@ -257,9 +266,9 @@ uni key off --person yourname</pre>
     <section>
       <h2>Inviting someone else</h2>
       <ol class="steps">
-        <li>They should <strong>join your org registry</strong> — not create a new registry with the same name.</li>
-        <li>After approval, they receive (or create with approval) a <strong>person key</strong>.</li>
-        <li>They run <code>uni pull</code> / <code>uni push</code> with their key enabled.</li>
+        <li>They run <code>uni join Unifact --person theirname</code> (same org name — not a new registry).</li>
+        <li>You approve: <code>uni approve Unifact --person theirname --by you</code>.</li>
+        <li>They receive an enabled person key, then use <code>uni pull</code> / <code>uni push</code>.</li>
         <li>If they leave or you need to pause access, turn their key <strong>off</strong>.</li>
       </ol>
       <div class="callout">

@@ -189,8 +189,30 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
         enabled INTEGER NOT NULL DEFAULT 1,
         namespaces TEXT NOT NULL DEFAULT '["*"]',
         scopes TEXT NOT NULL DEFAULT '["read","write"]',
+        registry_name TEXT,
         created_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS registries (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        owner_person TEXT NOT NULL,
+        description TEXT,
+        git_url TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS join_requests (
+        id TEXT PRIMARY KEY,
+        registry_name TEXT NOT NULL,
+        person TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        message TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        UNIQUE(registry_name, person)
       );
 
       CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace);
@@ -207,7 +229,14 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_api_keys_person ON api_keys(person);
       CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(api_key);
       CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
+      CREATE INDEX IF NOT EXISTS idx_registries_owner ON registries(owner_person);
+      CREATE INDEX IF NOT EXISTS idx_join_requests_registry ON join_requests(registry_name);
+      CREATE INDEX IF NOT EXISTS idx_join_requests_status ON join_requests(status);
     `);
+
+    await pool.query(`
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS registry_name TEXT
+    `).catch(() => undefined);
 }
 
 type Queryable = {

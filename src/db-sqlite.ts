@@ -99,6 +99,27 @@ function initializeSchema(sqlite: Database.Database) {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS registries (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        owner_person TEXT NOT NULL,
+        description TEXT,
+        git_url TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS join_requests (
+        id TEXT PRIMARY KEY,
+        registry_name TEXT NOT NULL,
+        person TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        message TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(registry_name, person)
+      );
     `);
 
     ensureColumns(sqlite, 'facts', [
@@ -137,6 +158,10 @@ function initializeSchema(sqlite: Database.Database) {
         { name: 'new_snapshot', definition: 'TEXT' }
     ]);
 
+    ensureColumns(sqlite, 'api_keys', [
+        { name: 'registry_name', definition: 'TEXT' }
+    ]);
+
     sqlite.exec(`
       CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace);
       CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(fact_type);
@@ -152,6 +177,9 @@ function initializeSchema(sqlite: Database.Database) {
       CREATE INDEX IF NOT EXISTS idx_api_keys_person ON api_keys(person);
       CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(api_key);
       CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
+      CREATE INDEX IF NOT EXISTS idx_registries_owner ON registries(owner_person);
+      CREATE INDEX IF NOT EXISTS idx_join_requests_registry ON join_requests(registry_name);
+      CREATE INDEX IF NOT EXISTS idx_join_requests_status ON join_requests(status);
     `);
 
     try {

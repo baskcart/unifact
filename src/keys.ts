@@ -9,6 +9,7 @@ export interface ApiKeyRecord {
     enabled: boolean;
     namespaces: string[];
     scopes: Array<'read' | 'write'>;
+    registry_name: string | null;
     created_at: number;
     updated_at: number;
 }
@@ -20,6 +21,7 @@ export interface CreateApiKeyInput {
     /** If set, use this key value instead of generating one (e.g. mirror local→origin). */
     api_key?: string;
     enabled?: boolean;
+    registry_name?: string | null;
 }
 
 function rowToRecord(row: ApiKeyRow): ApiKeyRecord {
@@ -33,6 +35,7 @@ function rowToRecord(row: ApiKeyRow): ApiKeyRecord {
         enabled: row.enabled === 1,
         namespaces: parseStringList(row.namespaces),
         scopes: scopes.length > 0 ? scopes : ['read', 'write'],
+        registry_name: row.registry_name ?? null,
         created_at: row.created_at,
         updated_at: row.updated_at
     };
@@ -90,19 +93,21 @@ export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyReco
     const scopes = input.scopes?.length ? input.scopes : (['read', 'write'] as Array<'read' | 'write'>);
     const apiKey = input.api_key?.trim() || `uf_${person.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24)}_${randomBytes(12).toString('hex')}`;
     const enabled = input.enabled === false ? 0 : 1;
+    const registryName = input.registry_name?.trim() || null;
     const now = Date.now();
 
     const existing = await getApiKeyByPerson(person);
     if (existing) {
         await db.run(
             `UPDATE api_keys
-             SET api_key = ?, enabled = ?, namespaces = ?, scopes = ?, updated_at = ?
+             SET api_key = ?, enabled = ?, namespaces = ?, scopes = ?, registry_name = ?, updated_at = ?
              WHERE person = ?`,
             [
                 apiKey,
                 enabled,
                 serializeStringListOrEmpty(namespaces, 'namespaces'),
                 serializeStringListOrEmpty(scopes, 'scopes'),
+                registryName,
                 now,
                 person
             ]
@@ -114,8 +119,8 @@ export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyReco
 
     const id = randomUUID();
     await db.run(
-        `INSERT INTO api_keys (id, person, api_key, enabled, namespaces, scopes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO api_keys (id, person, api_key, enabled, namespaces, scopes, registry_name, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             id,
             person,
@@ -123,6 +128,7 @@ export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyReco
             enabled,
             serializeStringListOrEmpty(namespaces, 'namespaces'),
             serializeStringListOrEmpty(scopes, 'scopes'),
+            registryName,
             now,
             now
         ]

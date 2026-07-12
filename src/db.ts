@@ -12,6 +12,8 @@ export type {
     DbClient,
     FactRow,
     FactVersionRow,
+    JoinRequestRow,
+    RegistryRow,
     RunResult
 } from './db-types.js';
 

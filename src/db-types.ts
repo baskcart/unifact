@@ -108,6 +108,27 @@ export interface ApiKeyRow {
     enabled: number;
     namespaces: string;
     scopes: string;
+    registry_name: string | null;
+    created_at: number;
+    updated_at: number;
+}
+
+export interface RegistryRow {
+    id: string;
+    name: string;
+    owner_person: string;
+    description: string | null;
+    git_url: string | null;
+    created_at: number;
+    updated_at: number;
+}
+
+export interface JoinRequestRow {
+    id: string;
+    registry_name: string;
+    person: string;
+    status: string;
+    message: string | null;
     created_at: number;
     updated_at: number;
 }

@@ -9,6 +9,14 @@ import {
     setApiKeyEnabled
 } from './keys.js';
 import {
+    approveJoin,
+    getRegistry,
+    initRegistry,
+    listJoinRequests,
+    listRegistries,
+    requestJoin
+} from './registry.js';
+import {
     approveFact,
     deleteAgentProfile,
     deleteFact,
@@ -103,6 +111,81 @@ app.post('/v1/keys/:person/off', requireAuth('write'), async (req: Request, res:
         return res.json({ success: true, key });
     } catch (err) {
         return handleError(res, err, 'Failed to disable API key');
+    }
+});
+
+app.get('/v1/registries', requireAuthOrBootstrap('read'), async (_req: Request, res: Response) => {
+    try {
+        const registries = await listRegistries();
+        return res.json({ registries, count: registries.length });
+    } catch (err) {
+        return handleError(res, err, 'Failed to list registries');
+    }
+});
+
+app.get('/v1/registries/:name', requireAuthOrBootstrap('read'), async (req: Request, res: Response) => {
+    try {
+        const registry = await getRegistry(req.params.name);
+        if (!registry) return res.status(404).json({ error: 'Registry not found' });
+        return res.json({ registry });
+    } catch (err) {
+        return handleError(res, err, 'Failed to load registry');
+    }
+});
+
+app.post('/v1/registries', requireAuthOrBootstrap('write'), async (req: Request, res: Response) => {
+    try {
+        const body = bodyAsRecord(req);
+        const result = await initRegistry({
+            name: String(body.name || ''),
+            person: String(body.person || ''),
+            description: typeof body.description === 'string' ? body.description : undefined,
+            git_url: typeof body.git_url === 'string' ? body.git_url : undefined
+        });
+        return res.json({ success: true, ...result });
+    } catch (err) {
+        return handleError(res, err, 'Failed to init registry');
+    }
+});
+
+app.post('/v1/registries/:name/join', requireAuthOrBootstrap('write'), async (req: Request, res: Response) => {
+    try {
+        const body = bodyAsRecord(req);
+        const request = await requestJoin({
+            registry: req.params.name,
+            person: String(body.person || ''),
+            message: typeof body.message === 'string' ? body.message : undefined
+        });
+        return res.json({ success: true, request });
+    } catch (err) {
+        return handleError(res, err, 'Failed to request join');
+    }
+});
+
+app.get('/v1/registries/:name/requests', requireAuth('read'), async (req: Request, res: Response) => {
+    try {
+        const requests = await listJoinRequests(req.params.name);
+        return res.json({ requests, count: requests.length });
+    } catch (err) {
+        return handleError(res, err, 'Failed to list join requests');
+    }
+});
+
+app.post('/v1/registries/:name/approve', requireAuth('write'), async (req: Request, res: Response) => {
+    try {
+        const body = bodyAsRecord(req);
+        const apiKey = getApiKey(req);
+        // approved_by must match owner; prefer body, else look up from key later — require body.person of joiner + approved_by
+        const result = await approveJoin({
+            registry: req.params.name,
+            person: String(body.person || ''),
+            approved_by: String(body.approved_by || ''),
+            pull: body.pull === true
+        });
+        void apiKey;
+        return res.json({ success: true, ...result });
+    } catch (err) {
+        return handleError(res, err, 'Failed to approve join');
     }
 });
 

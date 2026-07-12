@@ -3,9 +3,18 @@ import 'dotenv/config';
 import { getMetadataFromGitUrl } from './git-metadata.js';
 import {
     createApiKey,
+    getActiveLocalApiKey,
     listApiKeys,
     setApiKeyEnabled
 } from './keys.js';
+import {
+    approveJoin,
+    initRegistry,
+    listJoinRequests,
+    listRegistries,
+    parseJoinTarget,
+    requestJoin
+} from './registry.js';
 import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
 import { getSyncStatus, pullFactsFromRemote, pushFactsToRemote } from './store.js';
 
@@ -16,6 +25,21 @@ async function main() {
     switch (command) {
         case 'status':
             await statusCommand();
+            break;
+        case 'init':
+            await initCommand(args);
+            break;
+        case 'join':
+            await joinCommand(args);
+            break;
+        case 'approve':
+            await approveCommand(args);
+            break;
+        case 'registries':
+            await registriesCommand();
+            break;
+        case 'requests':
+            await requestsCommand(args);
             break;
         case 'pull':
             await pullCommand(args);
@@ -36,22 +60,26 @@ async function main() {
 }
 
 function printHelp() {
-    console.log('uni — UniFact local ↔ origin sync');
+    console.log('uni — UniFact registries and sync');
     console.log('');
     console.log('Usage: uni <command>');
     console.log('');
-    console.log('Commands:');
-    console.log('  status');
-    console.log('  pull [namespaces…]');
-    console.log('  push [namespaces…]');
-    console.log('  key create --person <name> [--namespaces a,b] [--remote]');
-    console.log('  key list');
-    console.log('  key on --person <name>');
-    console.log('  key off --person <name>');
-    console.log('  meta <git-url>     Fetch org/repo metadata from a Git URL (no git clone)');
+    console.log('Registry (like git init / join a remote):');
+    console.log('  init <Registry> --person <you> [--git-url <url>]');
+    console.log('  join <Registry|host/Registry> --person <you>');
+    console.log('  approve <Registry> --person <member> --by <owner>');
+    console.log('  registries');
+    console.log('  requests [Registry]');
     console.log('');
-    console.log('API keys live in the UniFact api_keys table (one per person, on/off).');
-    console.log('No master key and no API key env vars.');
+    console.log('Sync:');
+    console.log('  status | pull | push');
+    console.log('');
+    console.log('Keys:');
+    console.log('  key list | key on|off --person <name>');
+    console.log('  meta <git-url>');
+    console.log('');
+    console.log('First person: uni init Unifact --person admin');
+    console.log('Others:       uni join Unifact --person alice  (owner: uni approve …)');
 }
 
 function parseFlag(argv: string[], name: string): string | undefined {
@@ -68,16 +96,141 @@ async function statusCommand() {
     try {
         const status = await getSyncStatus();
         const sync = await getSyncConfig();
+        const registries = await listRegistries();
         console.log('Upstream status:');
         console.log(`  Enabled: ${status.enabled}`);
         console.log(`  Upstream URL: ${status.upstreamUrl || 'Not configured'}`);
-        console.log(`  Person: ${sync.person || 'none (create a key)'}`);
+        console.log(`  Person: ${sync.person || 'none'}`);
         console.log(`  Local Facts: ${status.localFacts}`);
         console.log(`  Review Queue: ${status.reviewQueue}`);
-        if (!status.enabled) {
-            console.log('');
-            console.log('Need: company.infrastructure/upstream-registry-url + an enabled api_keys row');
-            console.log('  uni key create --person you --remote');
+        console.log(`  Registries: ${registries.length ? registries.map(r => r.name).join(', ') : '(none — uni init <Name> --person you)'}`);
+    } catch (error) {
+        console.error('Error:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function initCommand(argv: string[]) {
+    const name = argv[0];
+    const person = parseFlag(argv, '--person');
+    const gitUrl = parseFlag(argv, '--git-url');
+    if (!name || !person) {
+        console.error('Usage: uni init <Registry> --person <you> [--git-url <url>]');
+        process.exit(1);
+    }
+    try {
+        const result = await initRegistry({ name, person, git_url: gitUrl });
+        console.log(`Initialized registry '${result.registry.name}'`);
+        console.log(`  Owner: ${result.registry.owner_person}`);
+        console.log(`  Key:   ${result.key.api_key} (ON)`);
+        if (result.registry.git_url) console.log(`  Git:   ${result.registry.git_url}`);
+        console.log('You own this registry. Others: uni join ' + result.registry.name + ' --person <name>');
+    } catch (error) {
+        console.error('Init failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function joinCommand(argv: string[]) {
+    const target = argv[0];
+    const person = parseFlag(argv, '--person');
+    if (!target || !person) {
+        console.error('Usage: uni join <Registry|host/Registry> --person <you>');
+        process.exit(1);
+    }
+    try {
+        const { host, registry } = parseJoinTarget(target);
+        if (host) {
+            const upstream = `http://${host}`;
+            const active = await getActiveLocalApiKey();
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (active?.api_key) headers['X-API-Key'] = active.api_key;
+            let response = await fetch(`${upstream}/v1/registries/${encodeURIComponent(registry)}/join`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ person })
+            });
+            if (!response.ok && (response.status === 401 || response.status === 403)) {
+                response = await fetch(`${upstream}/v1/registries/${encodeURIComponent(registry)}/join`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ person })
+                });
+            }
+            if (!response.ok) {
+                console.error(`Remote join failed: ${response.status} ${await response.text()}`);
+                process.exit(1);
+            }
+            const body = (await response.json()) as { request: { status: string } };
+            console.log(`Join request for '${registry}' on ${host}: ${body.request.status}`);
+            console.log('Wait for the owner to: uni approve ' + registry + ' --person ' + person + ' --by <owner>');
+            return;
+        }
+
+        const request = await requestJoin({ registry, person });
+        console.log(`Join request for '${registry}': ${request.status}`);
+        if (request.status === 'pending') {
+            console.log('Owner must approve: uni approve ' + registry + ' --person ' + person + ' --by <owner>');
+        }
+    } catch (error) {
+        console.error('Join failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function approveCommand(argv: string[]) {
+    const registry = argv[0];
+    const person = parseFlag(argv, '--person');
+    const by = parseFlag(argv, '--by');
+    if (!registry || !person || !by) {
+        console.error('Usage: uni approve <Registry> --person <member> --by <owner>');
+        process.exit(1);
+    }
+    try {
+        const result = await approveJoin({
+            registry,
+            person,
+            approved_by: by,
+            pull: hasFlag(argv, '--pull')
+        });
+        console.log(`Approved '${person}' on registry '${registry}'`);
+        console.log(`  Key: ${result.key.api_key} (ON)`);
+        if (result.pull) {
+            console.log(`  Pull: pulled=${result.pull.pulled} skipped=${result.pull.skipped}`);
+        }
+        console.log('Share the key with the member (or they pull after syncing keys).');
+    } catch (error) {
+        console.error('Approve failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function registriesCommand() {
+    try {
+        const registries = await listRegistries();
+        if (registries.length === 0) {
+            console.log('No registries. Create one: uni init Unifact --person you');
+            return;
+        }
+        for (const r of registries) {
+            console.log(`${r.name}  owner=${r.owner_person}${r.description ? `  — ${r.description}` : ''}`);
+        }
+    } catch (error) {
+        console.error('Error:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function requestsCommand(argv: string[]) {
+    try {
+        const registry = argv[0];
+        const requests = await listJoinRequests(registry);
+        if (requests.length === 0) {
+            console.log('No join requests.');
+            return;
+        }
+        for (const r of requests) {
+            console.log(`${r.status.padEnd(8)}  ${r.registry_name}  ${r.person}`);
         }
     } catch (error) {
         console.error('Error:', error instanceof Error ? error.message : String(error));

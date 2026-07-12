@@ -117,7 +117,8 @@ See `docs/aws-fargate.md` for container-oriented deploy. Staging often runs on L
 | Repo / site | Role |
 |-------------|------|
 | **This repo** | UniFact registry engine (API, MCP, CLI, storage) |
-| [unifact.ai](https://unifact.ai) / dahg-ai | Product UI / AI employee surfaces on trusted facts |
+| [unifact.ai](https://unifact.ai) | Product site / SMB + enterprise UI |
+| [User guide](docs/user-guide.html) | Plain-language guide for everyone |
 
 ## Positioning
 

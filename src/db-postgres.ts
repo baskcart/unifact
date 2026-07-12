@@ -324,9 +324,6 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope);
       CREATE INDEX IF NOT EXISTS idx_facts_actionability ON facts(actionability);
       CREATE INDEX IF NOT EXISTS idx_facts_registry_channel ON facts(registry_channel);
-      CREATE INDEX IF NOT EXISTS idx_facts_registry ON facts(registry_name);
-      CREATE INDEX IF NOT EXISTS idx_facts_version ON facts(registry_name, namespace, key, version);
-      CREATE INDEX IF NOT EXISTS idx_fact_versions_fact ON fact_versions(registry_name, namespace, key, version);
       CREATE INDEX IF NOT EXISTS idx_fact_versions_event ON fact_versions(event);
       CREATE INDEX IF NOT EXISTS idx_agent_profiles_role ON agent_profiles(role);
       CREATE INDEX IF NOT EXISTS idx_api_keys_person ON api_keys(person);
@@ -341,7 +338,14 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS registry_name TEXT
     `).catch(() => undefined);
 
+    // Must run before indexes that reference facts.registry_name (existing DBs lack the column).
     await migrateFactsToOrgPartitionPostgres(pool);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_facts_registry ON facts(registry_name);
+      CREATE INDEX IF NOT EXISTS idx_facts_version ON facts(registry_name, namespace, key, version);
+      CREATE INDEX IF NOT EXISTS idx_fact_versions_fact ON fact_versions(registry_name, namespace, key, version);
+    `);
 }
 
 type Queryable = {

@@ -12,7 +12,6 @@
       --card: #ffffff;
       --accent: #0f6b4c;
       --line: #ddd6c8;
-      --warn: #8a5a00;
     }
     * { box-sizing: border-box; }
     body {
@@ -83,13 +82,6 @@
       border-radius: 0 10px 10px 0;
       margin-top: 0.9rem;
     }
-    .note {
-      background: #fff8e8;
-      border-left: 4px solid var(--warn);
-      padding: 0.85rem 1rem;
-      border-radius: 0 10px 10px 0;
-      margin-top: 0.9rem;
-    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -103,7 +95,7 @@
       vertical-align: top;
     }
     th { color: var(--muted); font-weight: 600; }
-    code, kbd {
+    code {
       font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
       font-size: 0.92em;
       background: #f0ece4;
@@ -127,16 +119,6 @@
       font-size: 0.95rem;
     }
     a { color: var(--accent); }
-    .who { display: grid; gap: 0.75rem; }
-    @media (min-width: 640px) {
-      .who { grid-template-columns: 1fr 1fr; }
-    }
-    .who div {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 0.85rem 1rem;
-      background: #fcfbf8;
-    }
   </style>
 </head>
 <body>
@@ -144,201 +126,104 @@
     <p class="tagline">One Fact. One Truth.</p>
     <h1>UniFact User Guide</h1>
     <p class="lede">
-      UniFact is where your organization keeps <strong>trusted facts</strong> —
+      UniFact keeps <strong>trusted facts</strong> for your organization —
       policies, decisions, and knowledge that people and AI can rely on.
-      This guide is for everyone: founders, operators, reviewers, and teammates —
-      not only developers.
+      This is the short path to get started.
     </p>
   </header>
 
   <main>
     <section>
-      <h2>What UniFact is (in plain language)</h2>
+      <h2>The idea</h2>
       <p>
-        Think of Git as the place teams keep <em>code</em>.
-        UniFact is the place teams keep <em>facts</em> — short, clear statements of truth
-        with history, ownership, and approval.
+        Git is where teams keep <em>code</em>.
+        UniFact is where teams keep <em>facts</em> — short statements of truth with ownership and approval.
       </p>
       <ul>
         <li>“Our return window is 30 days.”</li>
         <li>“Employees receive 20 days of PTO.”</li>
-        <li>“Staging registry lives at staging.unifact.ai.”</li>
       </ul>
       <div class="callout">
-        <strong>Documents</strong> are where facts are written.
-        <strong>UniFact</strong> is where facts are managed, reviewed, and shared.
+        Each <strong>organization</strong> has its own registry and its own facts.
+        You only see orgs you own or belong to.
       </div>
     </section>
 
     <section>
-      <h2>How organizations work</h2>
-      <p>
-        UniFact is <strong>tenanted by organization</strong>.
-        A registry has a name — for example <strong>Unifact</strong>.
+      <h2>Get on an org</h2>
+      <pre>uni use admin
+uni init Unifact
+
+uni use alice
+uni join Unifact
+
+uni use admin
+uni approve Unifact alice
+uni team Unifact</pre>
+      <p class="muted">
+        First person <code>init</code>s the org and becomes owner.
+        Others <code>join</code>; the owner <code>approve</code>s.
+        Pause access later with <code>uni suspend Unifact alice</code>.
       </p>
-      <ol class="steps">
-        <li><strong>Owner creates the registry:</strong> <code>uni init Unifact --person admin</code></li>
-        <li><strong>Others request to join:</strong> <code>uni join Unifact --person alice</code></li>
-        <li><strong>Owner approves:</strong> <code>uni approve Unifact --person alice --by admin</code></li>
-        <li><strong>Owner can pause:</strong> <code>uni suspend Unifact --person alice --by admin</code> (restore with approve).</li>
-        <li>Each person gets <strong>one API key</strong>; approve/suspend control whether it works.</li>
-        <li>People and AI assistants use that key to read published facts and propose new ones.</li>
-      </ol>
-      <div class="note">
-        Creating a registry is about the <strong>organization name</strong>, not about cloning a Git repository.
-        You may optionally paste a GitHub/GitLab URL only to <em>suggest</em> the org name and description
-        (UniFact reads public metadata from the URL — it does not run Git).
-      </div>
     </section>
 
     <section>
-      <h2>Who this is for</h2>
-      <div class="who">
-        <div>
-          <h3>Owners &amp; admins</h3>
-          <p class="muted">Create the org registry, approve who joins, suspend access when needed.</p>
-        </div>
-        <div>
-          <h3>Teammates</h3>
-          <p class="muted">Join the org, pull trusted facts, propose updates for review.</p>
-        </div>
-        <div>
-          <h3>Reviewers / curators</h3>
-          <p class="muted">Approve or reject proposed facts before they become published truth.</p>
-        </div>
-        <div>
-          <h3>AI assistants</h3>
-          <p class="muted">Read published facts and propose new ones — same rules as people.</p>
-        </div>
-      </div>
+      <h2>See where you are</h2>
+      <pre>uni whoami
+uni status
+uni facts
+uni facts Unifact</pre>
+      <p class="muted">
+        <code>status</code> shows you and your orgs.
+        <code>facts</code> lists that org’s facts (if you belong to more than one org, name it).
+      </p>
     </section>
 
     <section>
-      <h2>The life of a fact</h2>
+      <h2>Add and share facts</h2>
       <table>
         <thead>
           <tr><th>Stage</th><th>Meaning</th></tr>
         </thead>
         <tbody>
-          <tr><td><strong>Working</strong></td><td>Draft on your side — not ready for the group yet.</td></tr>
-          <tr><td><strong>Proposed</strong></td><td>Submitted for review on the shared registry.</td></tr>
-          <tr><td><strong>Review</strong></td><td>A curator is evaluating it.</td></tr>
-          <tr><td><strong>Published</strong></td><td>Approved truth — safe for people and AI to use.</td></tr>
+          <tr><td><strong>Proposed</strong></td><td>Draft / submitted — not production truth yet.</td></tr>
+          <tr><td><strong>Feedback / review</strong></td><td>Open for comments or waiting on the owner.</td></tr>
+          <tr><td><strong>Published</strong></td><td>Approved truth — safe for people and AI.</td></tr>
         </tbody>
       </table>
-      <p class="muted" style="margin-top:0.75rem">
-        Facts can later be superseded or retracted when the world changes.
+      <pre>uni add "Returns are free within 30 days"
+uni facts
+uni publish policy/return_window
+uni push policy/return_window
+uni pull</pre>
+      <p class="muted">
+        <code>add</code> creates a proposed fact.
+        Owner <code>publish</code>es production truth, then <code>push</code> / <code>pull</code> sync with the shared host.
+        Only <strong>published</strong> facts come down on pull.
       </p>
     </section>
 
     <section>
-      <h2>Everyday actions</h2>
-      <h3>Create or join a registry</h3>
-      <pre>uni init Unifact --person admin
-uni join Unifact --person alice
-uni approve Unifact --person alice --by admin
-uni registries
-uni team Unifact</pre>
-      <p class="muted"><code>init</code> is like starting a new org workspace. <code>join</code> asks to become a member; the owner must approve.</p>
-
-      <h3>Check your connection</h3>
-      <pre>uni status</pre>
-      <p class="muted">Shows whether you are linked to the shared registry and which person key is active. Also lists local working / proposed / published counts.</p>
-
-      <h3>Add a local fact</h3>
-      <pre>uni add "I don't feel talking when there are more people talking"
-uni add "Returns are free within 30 days" --key return_window</pre>
-      <p class="muted">
-        Creates a <strong>proposed</strong> fact. Local agents can use proposed + review + feedback + published.
-        Production agents only use <strong>published</strong>.
-      </p>
-
-      <h3>Owner: publish or open for feedback</h3>
-      <pre>uni push
-uni publish policy/feeling_talk
-uni feedback policy/feeling_sleepy</pre>
-      <p class="muted">
-        On a <strong>shared</strong> registry, owner <code>uni push</code> lands in <code>feedback</code>;
-        others land in <code>review</code>. Owner <code>uni publish</code> only publishes from
-        <code>review</code> or <code>feedback</code> (two-step). Solo registries may publish from
-        <code>proposed</code> directly.
-      </p>
-
-      <h3>Get the latest published facts</h3>
-      <pre>uni pull</pre>
-      <p class="muted">Like refreshing from the source of truth. Only <strong>published</strong> facts come down.</p>
-
-      <h3>Send your proposals</h3>
-      <pre>uni push
-uni push policy
-uni push policy/feeling_talk
-uni push policy/feeling_*</pre>
-      <p class="muted">
-        Uploads matching draft/proposed facts for review — not an automatic publish.
-        You can push a whole namespace, one fact path, or a key glob (<code>*</code> / <code>?</code>).
-      </p>
-
-      <h3>Your personal key</h3>
-      <pre>uni key create --person yourname
-uni key list</pre>
-      <p class="muted">
-        Keys are stored in UniFact. Owners manage access with
-        <code>uni approve</code> / <code>uni suspend</code> (not day-to-day key toggles).
-        For a shared host, use the key printed by the owner's <code>uni approve</code>
-        (<code>uni key create --person you --api-key …</code>) — a local-only key will get
-        <strong>403</strong> on push.
-      </p>
-    </section>
-
-    <section>
-      <h2>Inviting someone else</h2>
+      <h2>Invite someone</h2>
       <ol class="steps">
-        <li>They run <code>uni join Unifact --person theirname</code> (or <code>uni join staging.unifact.ai/Unifact --person theirname</code> for a remote host).</li>
-        <li>You approve <strong>on that same host</strong>: <code>uni approve Unifact --person theirname --by you</code>.</li>
-        <li>Share the printed key. They install it: <code>uni key create --person theirname --api-key … --namespaces '*'</code>.</li>
-        <li>They use <code>uni pull</code> / <code>uni push</code>.</li>
-        <li>To pause access: <code>uni suspend Unifact --person theirname --by you</code>. Restore with <code>uni approve</code> again (same secret).</li>
+        <li>They: <code>uni use theirname</code> then <code>uni join Unifact</code> (or <code>uni join staging.unifact.ai/Unifact</code>).</li>
+        <li>You (owner): <code>uni approve Unifact theirname</code> — share the printed key if they work against a shared host.</li>
+        <li>They: <code>uni pull</code> / <code>uni push</code> with that same key.</li>
       </ol>
-      <div class="callout">
-        Shared host (for example staging.unifact.ai) can host many org registries.
-        Access is per organization and per person — not “everyone on the server sees everything.”
-      </div>
     </section>
 
     <section>
-      <h2>Optional: suggest org details from a Git URL</h2>
-      <p>
-        If your company already has a public GitHub or GitLab project, you can paste the URL
-        to fill in suggested names — without installing Git and without reading UniFact facts.
-      </p>
-      <pre>uni meta https://github.com/your-org/your-repo</pre>
-      <p class="muted">
-        UniFact reads public hosting metadata (org, repo name, description).
-        That does <strong>not</strong> replace creating or joining a UniFact registry.
-      </p>
-    </section>
-
-    <section>
-      <h2>What UniFact is not</h2>
+      <h2>More help</h2>
       <ul>
-        <li>Not a replacement for your code repository</li>
-        <li>Not a chat history or “agent memory dump”</li>
-        <li>Not an unreviewed wiki — publication is intentional</li>
-      </ul>
-    </section>
-
-    <section>
-      <h2>Getting help</h2>
-      <ul>
-        <li>Product site: <a href="https://unifact.ai">unifact.ai</a></li>
-        <li>Open-source project: <a href="https://github.com/baskcart/unifact">github.com/baskcart/unifact</a></li>
-        <li>Technical README in the repository (for install and hosting details)</li>
+        <li>Product: <a href="https://unifact.ai">unifact.ai</a></li>
+        <li>Code: <a href="https://github.com/baskcart/unifact">github.com/baskcart/unifact</a></li>
+        <li>Install details: README in the repo</li>
       </ul>
     </section>
   </main>
 
   <footer>
-    UniFact — source control for organizational facts. Guide written for all users.
+    UniFact — One Fact. One Truth.
   </footer>
 </body>
 </html>

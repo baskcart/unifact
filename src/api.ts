@@ -45,7 +45,9 @@ import {
     supersedeFact,
     upsertAgentProfile,
     upsertFact,
-    feedbackFact
+    feedbackFact,
+    exportAuditLog,
+    formatAuditExportCsv
 } from './store.js';
 
 const app = express();
@@ -699,6 +701,25 @@ app.get('/v1/facts/:namespace/:key/audit', requireAuth('read'), async (req: Requ
     } catch (err) {
         console.error(err);
         return res.status(500).json({ error: 'Internal database error' });
+    }
+});
+
+/** Org-scoped audit export for compliance / SIEM handoff. */
+app.get('/v1/audit', requireAuth('read'), async (req: Request, res: Response) => {
+    try {
+        const registry = await resolveRequestRegistry(req);
+        const format = String(req.query.format || 'json').toLowerCase();
+        const limit = req.query.limit ? Number(req.query.limit) : undefined;
+        const since = req.query.since ? Number(req.query.since) : undefined;
+        const rows = await exportAuditLog(registry, { limit, since });
+        if (format === 'csv') {
+            res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+            res.setHeader('Content-Disposition', `attachment; filename="unifact-audit-${registry}.csv"`);
+            return res.send(formatAuditExportCsv(rows));
+        }
+        return res.json({ registry, count: rows.length, entries: rows });
+    } catch (err) {
+        return handleError(res, err, 'Failed to export audit log');
     }
 });
 

@@ -31,8 +31,12 @@ import {
     supersedeFact,
     upsertAgentProfile,
     upsertFact,
-    feedbackFact
+    feedbackFact,
+    exportAuditLog
 } from './store.js';
+import { extractFactCandidates } from './extract.js';
+import { readFileSync } from 'fs';
+import { resolve as resolvePath } from 'path';
 import {
     FACT_ACTIONABILITIES,
     FACT_APPROVAL_STATUSES,
@@ -552,11 +556,83 @@ server.registerTool('audit_fact', {
           ORDER BY timestamp DESC
         `, [registry, namespace, key]);
 
+        return toolResult({ namespace, key, history: rows, count: rows.length });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('export_audit_log', {
+    description: 'Export org audit log (who changed which facts). Compliance handoff; JSON rows.',
+    inputSchema: {
+        limit: z.number().int().min(1).max(5000).optional().describe('Max rows (default 500)'),
+        since: z.number().int().optional().describe('Only entries at or after this unix ms timestamp'),
+        ...optionalRegistryField
+    }
+}, async ({ limit, since, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const entries = await exportAuditLog(registry, { limit, since });
+        return toolResult({ registry, count: entries.length, entries });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('extract_facts_from_document', {
+    description:
+        'Extract candidate facts from plain text or markdown. Writes proposed facts only (never published). Review with list_review_queue / approve_fact.',
+    inputSchema: {
+        text: z.string().optional().describe('Document text (markdown or plain)'),
+        path: z.string().optional().describe('Local file path if text is omitted'),
+        namespace: z.string().optional().describe('Target namespace (default policy)'),
+        max: z.number().int().min(1).max(200).optional().describe('Max candidates (default 40)'),
+        dry_run: z.boolean().optional().describe('If true, return candidates without writing'),
+        ...optionalRegistryField
+    }
+}, async ({ text, path: filePath, namespace, max, dry_run, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        let body = text ?? '';
+        if (!body && filePath) {
+            body = readFileSync(resolvePath(filePath), 'utf8');
+        }
+        if (!body.trim()) {
+            return errorResult('Provide text or path to a document');
+        }
+        const candidates = extractFactCandidates(body, { namespace, max });
+        if (dry_run) {
+            return toolResult({ registry, dry_run: true, count: candidates.length, candidates });
+        }
+        const written = [];
+        for (const c of candidates) {
+            const existing = await getFactRow(registry, c.namespace, c.key);
+            let key = c.key;
+            if (existing && existing.value !== c.value) {
+                key = `${c.key}_${c.source_line || written.length + 1}`;
+            }
+            const result = await upsertFact(registry, c.namespace, key, {
+                value: c.value,
+                description: `Extracted from document${c.source_line ? ` (line ${c.source_line})` : ''}`,
+                fact_type: 'decision_fact',
+                approval_status: 'pending',
+                registry_channel: 'proposed',
+                source: 'document_extract',
+                confidence: c.confidence === 'high' ? 0.8 : c.confidence === 'medium' ? 0.55 : 0.35,
+                _event: 'propose'
+            });
+            written.push({
+                namespace: result.fact.namespace,
+                key: result.fact.key,
+                channel: result.fact.registry_channel,
+                confidence: c.confidence
+            });
+        }
         return toolResult({
-            namespace,
-            key,
-            history: rows,
-            count: rows.length
+            registry,
+            proposed: written.length,
+            facts: written,
+            note: 'Candidates are proposed only. Review and publish explicitly.'
         });
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));

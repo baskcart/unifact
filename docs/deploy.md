@@ -114,3 +114,5 @@ Optional: you may add a concrete recipe for one provider later; it is not requir
 - [ ] At least one registry exists (`uni init …`)
 - [ ] Person keys are issued via join/approve (not env master keys)
 - [ ] Clients set upstream URL + use an enabled API key for `uni pull` / `uni push`
+
+Security / tenancy / audit export: **[enterprise-readiness.md](enterprise-readiness.md)**.

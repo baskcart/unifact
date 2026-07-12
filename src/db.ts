@@ -70,7 +70,8 @@ export const db: DbClient = {
     }
 };
 
-console.log(
+// stderr only — stdout must stay clean for MCP JSON-RPC stdio.
+console.error(
     databaseUrl
         ? '[unifact] Database backend: postgres (DATABASE_URL)'
         : `[unifact] Database backend: sqlite (${rootDb.name})`

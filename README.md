@@ -56,9 +56,15 @@ uni facts [Registry]
 uni team [Registry]
 uni init <Registry> | join <Registry> | approve | suspend
 uni add "<value>"
+uni extract <file.md> [--dry-run]   # → proposed only
 uni publish <namespace/key> | feedback <namespace/key>
+uni audit [--format json|csv]
 uni pull | push [ns | ns/key | pattern*]
 ```
+
+Enterprise readiness (tenancy, audit, checklist): [`docs/enterprise-readiness.md`](docs/enterprise-readiness.md)
+
+Work agents (Cursor, Codex, Claude, Devin, Antigravity, …): use **UniFact MCP** as the shared org-truth interface — [`docs/mcp.md`](docs/mcp.md).
 
 ## Shared host
 

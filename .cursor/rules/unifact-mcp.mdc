@@ -1,0 +1,17 @@
+---
+description: UniFact MCP is the shared org-truth interface for work agents
+alwaysApply: true
+---
+
+# UniFact first (MCP)
+
+Applies to **work agents** (Cursor, Codex, Claude, Devin, Antigravity, Cowork, and similar) — not only code editors.
+
+For organizational truth, procedure, infra policy, naming, and “how we operate”:
+
+1. Use **UniFact MCP** — prefer `sync_pull`, then `search_facts` / `list_facts` / `find_relevant_facts`.
+2. Do **not** start from README, source spelunking, or guessing when the registry may already hold the answer.
+3. Propose via MCP (`propose_fact` / `upsert_fact`); never treat drafts as published truth until review/publish.
+4. CLI (`uni …`) is for humans and MCP-down fallback; MCP is the default agent path.
+
+Setup: see `docs/mcp.md` and `.cursor/mcp.json.example`.

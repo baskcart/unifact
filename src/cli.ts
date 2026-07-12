@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import 'dotenv/config';
+import { readFileSync } from 'fs';
+import { resolve as resolvePath } from 'path';
 import { getMetadataFromGitUrl } from './git-metadata.js';
 import {
     createApiKey,
@@ -24,6 +26,7 @@ import {
     type PersonRegistryMembership
 } from './registry.js';
 import { sanitizeFactKey, suggestFactKey } from './suggest-key.js';
+import { extractFactCandidates } from './extract.js';
 import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
 import {
     feedbackFact,
@@ -35,7 +38,9 @@ import {
     pullFactsFromRemote,
     parsePushSelector,
     pushFactsToRemote,
-    upsertFact
+    upsertFact,
+    exportAuditLog,
+    formatAuditExportCsv
 } from './store.js';
 
 const command = process.argv[2];
@@ -86,6 +91,12 @@ async function main() {
         case 'facts':
             await factsCommand(args);
             break;
+        case 'audit':
+            await auditCommand(args);
+            break;
+        case 'extract':
+            await extractCommand(args);
+            break;
         case 'pull':
             await pullCommand(args);
             break;
@@ -129,6 +140,8 @@ function printHelp() {
     console.log('  suspend <Registry> <member>      # you (owner) pause member');
     console.log('  team [Registry]                  # your registries only');
     console.log('  facts [Registry]                 # list facts (prompt if many orgs)');
+    console.log('  extract <file.md> [--dry-run]    # doc → proposed facts (never auto-publish)');
+    console.log('  audit [--format json|csv]        # export org audit log');
     console.log('  registries                       # registries you own or belong to');
     console.log('');
     console.log('Sync:');
@@ -138,6 +151,7 @@ function printHelp() {
     console.log('  key list | key create --person <name> [--namespaces a,b] [--api-key uf_…] [--remote]');
     console.log('  key on|off --person <name>   # low-level; prefer approve / suspend');
     console.log('  meta <git-url>');
+    console.log('  Enterprise pack: docs/enterprise-readiness.md');
     console.log('');
     console.log('First person: uni init Unifact --person admin');
     console.log('Others:       uni use alice && uni join host/Unifact');
@@ -160,7 +174,7 @@ function hasFlag(argv: string[], name: string): boolean {
     return argv.includes(name);
 }
 
-const BOOLEAN_FLAGS = new Set(['--all', '--publish', '--pull']);
+const BOOLEAN_FLAGS = new Set(['--all', '--publish', '--pull', '--dry-run']);
 
 function positionalArgs(argv: string[]): string[] {
     const out: string[] = [];
@@ -935,6 +949,80 @@ function truncateFactValue(value: unknown, max = 72): string {
     if (!text) return '';
     const oneLine = text.replace(/\s+/g, ' ').trim();
     return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+async function auditCommand(argv: string[]) {
+    try {
+        const format = (parseFlag(argv, '--format') || 'json').toLowerCase();
+        const limitFlag = parseFlag(argv, '--limit');
+        const limit = limitFlag ? Number(limitFlag) : 500;
+        const registry = await resolveWorkingRegistry();
+        const rows = await exportAuditLog(registry, { limit });
+        if (format === 'csv') {
+            process.stdout.write(formatAuditExportCsv(rows));
+            return;
+        }
+        console.log(JSON.stringify({ registry, count: rows.length, entries: rows }, null, 2));
+    } catch (error) {
+        console.error('Audit failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function extractCommand(argv: string[]) {
+    const file = positionalArgs(argv)[0];
+    if (!file) {
+        console.error('Usage: uni extract <file.md|file.txt> [--dry-run] [--namespace policy]');
+        process.exit(1);
+    }
+    try {
+        const person = await resolvePerson(argv);
+        await assertPersonAccess(person);
+        const registry = await resolveWorkingRegistry(person);
+        const namespace = parseFlag(argv, '--namespace') || 'policy';
+        const dryRun = hasFlag(argv, '--dry-run');
+        const body = readFileSync(resolvePath(file), 'utf8');
+        const candidates = extractFactCandidates(body, { namespace });
+        if (candidates.length === 0) {
+            console.log('No candidate facts found. Try clearer statements or bullet lists.');
+            return;
+        }
+
+        console.log(`Extract → ${dryRun ? 'dry-run' : 'proposed'}  registry=${registry}  from ${file}`);
+        let written = 0;
+        for (const c of candidates) {
+            if (dryRun) {
+                console.log(`  [${c.confidence}] ${c.namespace}/${c.key}  ${truncateFactValue(c.value)}`);
+                continue;
+            }
+            let key = c.key;
+            const existing = await getFactRow(registry, c.namespace, key);
+            if (existing && existing.value !== c.value) {
+                key = `${c.key}_L${c.source_line || written + 1}`;
+            }
+            const result = await upsertFact(registry, c.namespace, key, {
+                value: c.value,
+                description: `Extracted from ${file}${c.source_line ? ` (line ${c.source_line})` : ''}`,
+                fact_type: 'decision_fact',
+                approval_status: 'pending',
+                registry_channel: 'proposed',
+                created_by: person,
+                source: 'document_extract',
+                confidence: c.confidence === 'high' ? 0.8 : c.confidence === 'medium' ? 0.55 : 0.35,
+                _event: 'propose'
+            });
+            written += 1;
+            console.log(`  proposed ${result.fact.namespace}/${result.fact.key}`);
+        }
+        if (!dryRun) {
+            console.log('');
+            console.log(`Proposed ${written} fact(s). Review: uni facts`);
+            console.log('Publish only after review: uni publish <namespace/key>');
+        }
+    } catch (error) {
+        console.error('Extract failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
 }
 
 async function printTeam(registryName: string) {

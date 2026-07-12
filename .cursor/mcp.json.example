@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "unifact": {
+      "command": "C:/Program Files/nodejs/node.exe",
+      "args": [
+        "C:/PATH/TO/unifact/node_modules/tsx/dist/cli.mjs",
+        "C:/PATH/TO/unifact/src/mcp.ts"
+      ],
+      "env": {
+        "DATABASE_PATH": "C:/PATH/TO/unifact/store.db"
+      }
+    }
+  }
+}

@@ -201,6 +201,14 @@ uni pull</pre>
         Owner <code>publish</code>es production truth, then <code>push</code> / <code>pull</code> sync with the shared host.
         Only <strong>published</strong> facts come down on pull.
       </p>
+      <h3>From a document</h3>
+      <pre>uni extract ./policy.md --dry-run
+uni extract ./policy.md
+uni facts
+uni publish policy/…</pre>
+      <p class="muted">
+        Turns bullets/statements into <strong>proposed</strong> facts only — never auto-published.
+      </p>
     </section>
 
     <section>

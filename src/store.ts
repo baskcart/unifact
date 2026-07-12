@@ -1,4 +1,4 @@
-import { db, AgentProfileRow, FactRow, FactVersionRow } from './db.js';
+import { db, AgentProfileRow, AuditLogRow, FactRow, FactVersionRow } from './db.js';
 import {
     AgentProfileResponse,
     FACT_ACTIONABILITIES,
@@ -1594,4 +1594,97 @@ export async function getSyncStatus(): Promise<SyncStatusResult> {
         reviewQueue: reviewQueue?.count ?? 0,
         lastSync: null
     };
+}
+
+export interface AuditExportRow {
+    id: number;
+    registry_name: string;
+    action: string;
+    namespace: string;
+    key: string;
+    old_value: string | null;
+    new_value: string | null;
+    timestamp: number;
+    timestamp_iso: string;
+}
+
+export async function exportAuditLog(
+    registryName: string,
+    options?: { limit?: number; since?: number }
+): Promise<AuditExportRow[]> {
+    const limit = Math.min(Math.max(options?.limit ?? 500, 1), 5000);
+    const since = options?.since;
+    const rows = since
+        ? await db.all<AuditLogRow>(
+              `
+          SELECT id, action, registry_name, namespace, key, old_value, new_value,
+                 old_snapshot, new_snapshot, timestamp
+          FROM audit_log
+          WHERE registry_name = ? AND timestamp >= ?
+          ORDER BY timestamp DESC
+          LIMIT ?
+        `,
+              [registryName, since, limit]
+          )
+        : await db.all<AuditLogRow>(
+              `
+          SELECT id, action, registry_name, namespace, key, old_value, new_value,
+                 old_snapshot, new_snapshot, timestamp
+          FROM audit_log
+          WHERE registry_name = ?
+          ORDER BY timestamp DESC
+          LIMIT ?
+        `,
+              [registryName, limit]
+          );
+
+    return rows.map((row) => ({
+        id: row.id,
+        registry_name: row.registry_name || registryName,
+        action: row.action,
+        namespace: row.namespace,
+        key: row.key,
+        old_value: row.old_value,
+        new_value: row.new_value,
+        timestamp: row.timestamp,
+        timestamp_iso: new Date(row.timestamp).toISOString()
+    }));
+}
+
+export function formatAuditExportCsv(rows: AuditExportRow[]): string {
+    const header = [
+        'id',
+        'registry_name',
+        'action',
+        'namespace',
+        'key',
+        'old_value',
+        'new_value',
+        'timestamp',
+        'timestamp_iso'
+    ];
+    const escape = (v: string | number | null) => {
+        const s = v == null ? '' : String(v);
+        if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+    };
+    const lines = [header.join(',')];
+    for (const row of rows) {
+        lines.push(
+            [
+                row.id,
+                row.registry_name,
+                row.action,
+                row.namespace,
+                row.key,
+                row.old_value,
+                row.new_value,
+                row.timestamp,
+                row.timestamp_iso
+            ]
+                .map(escape)
+                .join(',')
+        );
+    }
+    return lines.join('\n') + '\n';
 }

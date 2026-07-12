@@ -19,11 +19,11 @@ export type {
 
 /**
  * Backend selection:
- * - DATABASE_URL set → PostgreSQL (e.g. Lightsail/RDS staging origin)
+ * - DATABASE_URL set → PostgreSQL (shared origin / remote host)
  * - otherwise → SQLite at DATABASE_PATH or ./store.db
  *
  * Example (do not commit real passwords):
- * DATABASE_URL=postgresql://dbmasteruser:ENCODED_PASSWORD@HOST:5432/unifact?sslmode=require
+ * DATABASE_URL=postgresql://user:ENCODED_PASSWORD@HOST:5432/unifact?sslmode=require
  */
 const databaseUrl = process.env.DATABASE_URL?.trim();
 

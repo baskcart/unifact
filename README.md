@@ -108,9 +108,9 @@ uni requests Unifact
 
 Optional: `uni join staging.unifact.ai/Unifact --person alice` posts the join request to that host.
 
-## Deploy notes
+## Deploy
 
-See `docs/aws-fargate.md` for container-oriented deploy. Staging often runs on Lightsail (Node instance + managed Postgres) with `DATABASE_URL` on the server only.
+See **[docs/deploy.md](docs/deploy.md)** — run UniFact anywhere (Node or Docker + SQLite or PostgreSQL). Not tied to a specific cloud vendor.
 
 ## Related
 

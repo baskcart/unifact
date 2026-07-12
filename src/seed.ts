@@ -146,7 +146,7 @@ const SEED_FACTS: SeedFact[] = [
         namespace: 'company.decisions',
         key: 'unifact-hosting',
         value: 'Hosted UniFact origin uses PostgreSQL on AWS (RDS or equivalent managed Postgres); local stays SQLite.',
-        description: 'Prefer managed AWS Postgres for the shared registry. Fargate/Lightsail for the UniFact API process is a separate compute choice from the Postgres origin store.',
+        description: 'Prefer managed PostgreSQL for the shared origin registry. Compute (VM, container, or PaaS) is a separate choice from the Postgres store and is not tied to one cloud vendor.',
         fact_type: 'decision_fact',
         subject: 'unifact',
         scope: 'infrastructure',

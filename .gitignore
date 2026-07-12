@@ -8,3 +8,6 @@ store.db-*
 .agents/
 .codex/
 *.log
+*.pem
+*.ppk
+LightsailDefaultKey*

@@ -2,8 +2,7 @@ import { randomUUID } from 'crypto';
 import { db, type JoinRequestRow, type RegistryRow } from './db.js';
 import { createApiKey, getApiKeyByPerson, setApiKeyEnabled, type ApiKeyRecord } from './keys.js';
 import { getMetadataFromGitUrl } from './git-metadata.js';
-import { pullFactsFromRemote } from './store.js';
-import { upsertFact } from './store.js';
+import { pullFactsFromRemote, upsertFact } from './store.js';
 import { getRemoteBranchUrl, pushPersonKeyToRemote, type RemoteKeyPushResult } from './sync.js';
 
 export interface RegistryRecord {
@@ -108,11 +107,63 @@ async function requireRegistry(name: string): Promise<RegistryRecord> {
 export async function listJoinRequests(registryName?: string): Promise<JoinRequestRecord[]> {
     const rows = registryName
         ? await db.all<JoinRequestRow>(
-            'SELECT * FROM join_requests WHERE lower(registry_name) = lower(?) ORDER BY created_at ASC',
-            [normalizeRegistryName(registryName)]
-        )
+              'SELECT * FROM join_requests WHERE lower(registry_name) = lower(?) ORDER BY created_at ASC',
+              [normalizeRegistryName(registryName)]
+          )
         : await db.all<JoinRequestRow>('SELECT * FROM join_requests ORDER BY created_at ASC');
     return rows.map(toJoinRequest);
+}
+
+export type PersonRegistryMembership = {
+    registry: RegistryRecord;
+    role: 'owner' | 'member';
+    status: string;
+};
+
+/** Registries where person is owner or approved member (not pending/suspended). */
+export async function listRegistriesForPerson(person: string): Promise<PersonRegistryMembership[]> {
+    const name = person.trim();
+    if (!name) return [];
+
+    const all = await listRegistries();
+    const out: PersonRegistryMembership[] = [];
+
+    for (const registry of all) {
+        if (registry.owner_person === name) {
+            out.push({ registry, role: 'owner', status: 'owner' });
+            continue;
+        }
+        const requests = await listJoinRequests(registry.name);
+        const mine = requests.find((r) => r.person === name && r.status === 'approved');
+        if (mine) {
+            out.push({ registry, role: 'member', status: 'approved' });
+        }
+    }
+
+    return out;
+}
+
+/** Owner or approved member of this registry (case-insensitive name). */
+export async function getPersonMembership(
+    person: string,
+    registryName: string
+): Promise<PersonRegistryMembership | undefined> {
+    const mine = await listRegistriesForPerson(person);
+    const want = normalizeRegistryName(registryName);
+    return mine.find((m) => m.registry.name.toLowerCase() === want.toLowerCase());
+}
+
+export async function assertPersonMemberOfRegistry(
+    person: string,
+    registryName: string
+): Promise<PersonRegistryMembership> {
+    const membership = await getPersonMembership(person, registryName);
+    if (!membership) {
+        throw new Error(
+            `Not a member of '${normalizeRegistryName(registryName)}'. Join first: uni join ${normalizeRegistryName(registryName)}`
+        );
+    }
+    return membership;
 }
 
 export interface TeamMemberView {
@@ -166,7 +217,7 @@ export async function getTeam(registryName: string): Promise<TeamView> {
 }
 
 async function setActiveRegistryFact(registryName: string, upstreamUrl?: string | null): Promise<void> {
-    await upsertFact('company.infrastructure', 'active-registry', {
+    await upsertFact(registryName, 'company.infrastructure', 'active-registry', {
         value: registryName,
         description: 'Local active UniFact org registry name',
         fact_type: 'decision_fact',
@@ -176,7 +227,7 @@ async function setActiveRegistryFact(registryName: string, upstreamUrl?: string 
         _event: 'publish'
     });
     if (upstreamUrl) {
-        await upsertFact('company.infrastructure', 'upstream-registry-url', {
+        await upsertFact(registryName, 'company.infrastructure', 'upstream-registry-url', {
             value: upstreamUrl.replace(/\/$/, ''),
             description: 'Upstream UniFact host for pull/push',
             fact_type: 'decision_fact',
@@ -186,6 +237,41 @@ async function setActiveRegistryFact(registryName: string, upstreamUrl?: string 
             _event: 'publish'
         });
     }
+}
+
+/** Switch the local "working org" pointer (shown in uni status / whoami). */
+export async function focusRegistry(registryName: string): Promise<void> {
+    const registry = await requireRegistry(registryName);
+    await setActiveRegistryFact(registry.name);
+}
+
+/**
+ * Active org for this person: their key's registry_name, else company.infrastructure/active-registry.
+ */
+export async function resolveActiveRegistry(person?: string | null): Promise<string | null> {
+    if (person) {
+        const key = await getApiKeyByPerson(person);
+        if (key?.registry_name) return key.registry_name;
+    }
+    // Prefer person's key first (above). Fact fallback: any registry, newest first.
+    const row = await db.get<{ value: string }>(`
+      SELECT value FROM facts
+      WHERE namespace = 'company.infrastructure' AND key = 'active-registry'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `);
+    return row?.value?.trim() || null;
+}
+
+/**
+ * Require a working registry for fact ops. Throws if none is configured.
+ */
+export async function requireWorkingRegistry(person?: string | null): Promise<string> {
+    const name = await resolveActiveRegistry(person);
+    if (!name) {
+        throw new Error('No active registry. uni init <Registry> or uni join …');
+    }
+    return name;
 }
 
 /**
@@ -268,6 +354,8 @@ async function mirrorRegistryToRemote(input: {
     }
 
     try {
+        // Public endpoint: anyone may create an org. Body carries the matched owner api_key.
+        // Do NOT make /v1/keys or fact writes public — only org create is open.
         const response = await fetch(`${remoteUrl}/v1/registries`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -280,41 +368,42 @@ async function mirrorRegistryToRemote(input: {
             })
         });
 
-        if (!response.ok) {
-            const text = await response.text().catch(() => '');
-            // Org may already exist on origin — still try to upsert the owner key.
-            if (response.status !== 409 && response.status !== 400) {
-                return {
-                    attempted: true,
-                    pushed: false,
-                    status: response.status,
-                    detail: text.slice(0, 200) || response.statusText
-                };
-            }
-        }
-
-        // Ensure owner key/namespaces are on origin (same secret).
-        const keyPush = await pushPersonKeyToRemote({
-            person: input.key.person,
-            api_key: input.key.api_key,
-            namespaces: input.key.namespaces,
-            scopes: input.key.scopes,
-            enabled: true,
-            ownerApiKey: input.key.api_key
-        });
-
-        if (keyPush.pushed) return keyPush;
-
-        // After public registry create, owner key should auth; if key push failed, report registry create OK.
         if (response.ok) {
-            return { attempted: true, pushed: true, detail: 'Registry created on origin' };
+            return { attempted: true, pushed: true, detail: 'Registry + owner key created on origin' };
         }
-        return keyPush;
-    } catch (error) {
+
+        const text = await response.text().catch(() => '');
+        const detail = text.slice(0, 300) || response.statusText;
+
+        // Person already exists on origin with a different secret — install that key locally,
+        // or init with a new person name. Do not fall through to /v1/keys (misleading 401).
+        if (/different key|already has a different key|already exists/i.test(detail)) {
+            return {
+                attempted: true,
+                pushed: false,
+                status: response.status,
+                detail:
+                    `${detail} — Origin already knows person '${input.key.person}' with another secret. ` +
+                    `Use a new person (uni use name --new) then uni init, or install the origin key locally.`
+            };
+        }
+
         return {
             attempted: true,
             pushed: false,
-            detail: error instanceof Error ? error.message : String(error)
+            status: response.status,
+            detail
+        };
+    } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const hint =
+            /fetch failed|certificate|SSL|TLS|EPROTO/i.test(msg)
+                ? ' — check company.infrastructure/upstream-registry-url (prefer https://staging.unifact.ai)'
+                : '';
+        return {
+            attempted: true,
+            pushed: false,
+            detail: `${msg}${hint}`
         };
     }
 }

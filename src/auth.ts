@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { countApiKeys, keyHasAccess } from './keys.js';
+import { countApiKeys, findApiKeyBySecret, keyHasAccess, apiKeyAllowsNamespace } from './keys.js';
 
 /**
  * Auth is DB-only: one API key per person in `api_keys`.
@@ -19,13 +19,28 @@ export function requireAuth(scope: 'read' | 'write') {
         const apiKey = (req.headers['x-api-key'] || req.query.key) as string | undefined;
         const namespace = req.params.namespace;
 
-        if (!namespace) {
-            const ok = await keyHasAccess(apiKey, undefined, scope);
-            if (ok) return next();
-            return res.status(401).json({ error: 'Unauthorized: Missing or invalid API key' });
+        if (!apiKey) {
+            return res.status(401).json({ error: 'Unauthorized: Missing API key' });
         }
 
-        if (await keyHasAccess(apiKey, namespace, scope)) {
+        const record = await findApiKeyBySecret(apiKey);
+        if (!record) {
+            return res.status(401).json({
+                error: 'Unauthorized: Unknown or disabled API key (local secret must match origin)'
+            });
+        }
+
+        if (!record.scopes.includes(scope)) {
+            return res.status(403).json({
+                error: `Forbidden: API key does not have ${scope} scope`
+            });
+        }
+
+        if (!namespace) {
+            return next();
+        }
+
+        if (apiKeyAllowsNamespace(record, namespace)) {
             return next();
         }
 

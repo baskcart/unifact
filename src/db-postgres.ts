@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { AsyncLocalStorage } from 'async_hooks';
 import type { DbClient, RunResult } from './db-types.js';
+import { pickDefaultRegistryName } from './migrate-fact-registry.js';
 
 const { Pool, types } = pg;
 
@@ -12,6 +13,7 @@ const txContext = new AsyncLocalStorage<PostgresSession>();
 const FACT_TSVECTOR = `
   to_tsvector(
     'english',
+    coalesce(registry_name, '') || ' ' ||
     coalesce(namespace, '') || ' ' ||
     coalesce(key, '') || ' ' ||
     coalesce(value, '') || ' ' ||
@@ -97,10 +99,108 @@ async function ensureDatabaseExists(connectionString: string): Promise<void> {
     }
 }
 
+async function resolveDefaultRegistryNamePostgres(pool: pg.Pool): Promise<string> {
+    const keyRegs = await pool.query<{ name: string }>(
+        `SELECT DISTINCT registry_name AS name FROM api_keys WHERE registry_name IS NOT NULL AND trim(registry_name) != ''`
+    );
+    const singleApiKeyRegistry = keyRegs.rows.length === 1 ? keyRegs.rows[0].name : null;
+
+    const active = await pool.query<{ value: string }>(
+        `SELECT value FROM facts WHERE namespace = 'company.infrastructure' AND key = 'active-registry' LIMIT 1`
+    );
+    const first = await pool.query<{ name: string }>(
+        `SELECT name FROM registries ORDER BY created_at ASC LIMIT 1`
+    );
+
+    return pickDefaultRegistryName({
+        singleApiKeyRegistry,
+        activeRegistryFact: active.rows[0]?.value ?? null,
+        firstRegistry: first.rows[0]?.name ?? null
+    });
+}
+
+async function migrateFactsToOrgPartitionPostgres(pool: pg.Pool): Promise<void> {
+    await pool.query(`ALTER TABLE facts ADD COLUMN IF NOT EXISTS registry_name TEXT`);
+    await pool.query(`ALTER TABLE fact_versions ADD COLUMN IF NOT EXISTS registry_name TEXT`);
+    await pool.query(`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS registry_name TEXT`);
+
+    const defaultRegistry = await resolveDefaultRegistryNamePostgres(pool);
+    // Existing DBs: ADD COLUMN leaves nulls; also overwrite legacy default if we just added the column.
+    const nullCount = await pool.query<{ c: string }>(
+        `SELECT COUNT(*)::text AS c FROM facts WHERE registry_name IS NULL OR trim(registry_name) = ''`
+    );
+    if (Number(nullCount.rows[0]?.c || 0) > 0) {
+        await pool.query(`UPDATE facts SET registry_name = $1 WHERE registry_name IS NULL OR trim(registry_name) = ''`, [
+            defaultRegistry
+        ]);
+    }
+    await pool.query(`
+      UPDATE fact_versions fv
+      SET registry_name = f.registry_name
+      FROM facts f
+      WHERE f.namespace = fv.namespace AND f.key = fv.key
+        AND (fv.registry_name IS NULL OR trim(fv.registry_name) = '')
+    `);
+    await pool.query(
+        `UPDATE fact_versions SET registry_name = $1 WHERE registry_name IS NULL OR trim(registry_name) = ''`,
+        [defaultRegistry]
+    );
+    await pool.query(
+        `UPDATE audit_log SET registry_name = $1 WHERE registry_name IS NULL OR trim(registry_name) = ''`,
+        [defaultRegistry]
+    );
+
+    // Drop old UNIQUE(namespace, key) if present; add UNIQUE(registry_name, namespace, key)
+    const constraints = await pool.query<{ conname: string; def: string }>(`
+      SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+      FROM pg_constraint c
+      JOIN pg_class t ON c.conrelid = t.oid
+      WHERE t.relname = 'facts' AND c.contype = 'u'
+    `);
+    for (const row of constraints.rows) {
+        const def = row.def.replace(/\s+/g, ' ').toLowerCase();
+        if (
+            def.includes('(namespace, key)') ||
+            def.includes('(namespace,key)') ||
+            (def.includes('namespace') && def.includes('key') && !def.includes('registry_name'))
+        ) {
+            await pool.query(`ALTER TABLE facts DROP CONSTRAINT IF EXISTS ${row.conname}`);
+        }
+    }
+
+    const hasOrgUnique = constraints.rows.some((row) =>
+        /UNIQUE\s*\(\s*registry_name\s*,\s*namespace\s*,\s*key\s*\)/i.test(row.def)
+    );
+    if (!hasOrgUnique) {
+        // Re-check after drops
+        const after = await pool.query<{ conname: string; def: string }>(`
+          SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+          FROM pg_constraint c
+          JOIN pg_class t ON c.conrelid = t.oid
+          WHERE t.relname = 'facts' AND c.contype = 'u'
+        `);
+        const already = after.rows.some((row) =>
+            /UNIQUE\s*\(\s*registry_name\s*,\s*namespace\s*,\s*key\s*\)/i.test(row.def)
+        );
+        if (!already) {
+            await pool.query(`
+              ALTER TABLE facts
+              ADD CONSTRAINT facts_registry_name_namespace_key_key UNIQUE (registry_name, namespace, key)
+            `).catch(() => undefined);
+        }
+    }
+
+    await pool.query(`ALTER TABLE facts ALTER COLUMN registry_name SET DEFAULT 'local'`);
+    await pool.query(`ALTER TABLE facts ALTER COLUMN registry_name SET NOT NULL`).catch(() => undefined);
+    await pool.query(`ALTER TABLE fact_versions ALTER COLUMN registry_name SET DEFAULT 'local'`);
+    await pool.query(`ALTER TABLE audit_log ALTER COLUMN registry_name SET DEFAULT 'local'`);
+}
+
 async function initializeSchema(pool: pg.Pool): Promise<void> {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS facts (
         rowid BIGSERIAL PRIMARY KEY,
+        registry_name TEXT NOT NULL DEFAULT 'local',
         namespace TEXT NOT NULL,
         key TEXT NOT NULL,
         value TEXT NOT NULL,
@@ -135,12 +235,13 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
         superseded_by TEXT,
         created_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL,
-        UNIQUE(namespace, key)
+        UNIQUE(registry_name, namespace, key)
       );
 
       CREATE TABLE IF NOT EXISTS audit_log (
         id SERIAL PRIMARY KEY,
         action TEXT NOT NULL,
+        registry_name TEXT NOT NULL DEFAULT 'local',
         namespace TEXT NOT NULL,
         key TEXT NOT NULL,
         old_value TEXT,
@@ -152,6 +253,7 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
 
       CREATE TABLE IF NOT EXISTS fact_versions (
         id SERIAL PRIMARY KEY,
+        registry_name TEXT NOT NULL DEFAULT 'local',
         namespace TEXT NOT NULL,
         key TEXT NOT NULL,
         version INTEGER NOT NULL,
@@ -222,8 +324,9 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope);
       CREATE INDEX IF NOT EXISTS idx_facts_actionability ON facts(actionability);
       CREATE INDEX IF NOT EXISTS idx_facts_registry_channel ON facts(registry_channel);
-      CREATE INDEX IF NOT EXISTS idx_facts_version ON facts(namespace, key, version);
-      CREATE INDEX IF NOT EXISTS idx_fact_versions_fact ON fact_versions(namespace, key, version);
+      CREATE INDEX IF NOT EXISTS idx_facts_registry ON facts(registry_name);
+      CREATE INDEX IF NOT EXISTS idx_facts_version ON facts(registry_name, namespace, key, version);
+      CREATE INDEX IF NOT EXISTS idx_fact_versions_fact ON fact_versions(registry_name, namespace, key, version);
       CREATE INDEX IF NOT EXISTS idx_fact_versions_event ON fact_versions(event);
       CREATE INDEX IF NOT EXISTS idx_agent_profiles_role ON agent_profiles(role);
       CREATE INDEX IF NOT EXISTS idx_api_keys_person ON api_keys(person);
@@ -237,6 +340,8 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
     await pool.query(`
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS registry_name TEXT
     `).catch(() => undefined);
+
+    await migrateFactsToOrgPartitionPostgres(pool);
 }
 
 type Queryable = {

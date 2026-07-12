@@ -16,6 +16,7 @@ import {
     listJoinRequests,
     listRegistries,
     requestJoin,
+    resolveActiveRegistry,
     suspendJoin
 } from './registry.js';
 import {
@@ -240,6 +241,38 @@ function getApiKey(req: Request): string | undefined {
     return undefined;
 }
 
+/**
+ * Resolve org registry from API key. Optional query/body registry_name must match (no cross-tenant).
+ */
+async function resolveRequestRegistry(req: Request): Promise<string> {
+    const secret = getApiKey(req);
+    const keyRecord = secret ? await findApiKeyBySecret(secret) : undefined;
+    let registryName = keyRecord?.registry_name?.trim() || null;
+    if (!registryName && keyRecord?.person) {
+        registryName = await resolveActiveRegistry(keyRecord.person);
+    }
+    if (!registryName) {
+        const err = new Error('API key has no registry_name');
+        (err as Error & { status?: number }).status = 400;
+        throw err;
+    }
+
+    const bodyReg =
+        req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+            ? (req.body as Record<string, unknown>).registry_name
+            : undefined;
+    const requested =
+        getQueryString(req, 'registry_name') ??
+        (typeof bodyReg === 'string' ? bodyReg : undefined);
+    if (requested && requested !== registryName) {
+        const err = new Error(`registry_name must match API key registry '${registryName}'`);
+        (err as Error & { status?: number }).status = 400;
+        throw err;
+    }
+
+    return registryName;
+}
+
 function getQueryString(req: Request, name: string): string | undefined {
     const value = req.query[name];
     if (typeof value === 'string') {
@@ -300,8 +333,13 @@ function sendFormatted(res: Response, facts: FactData[], format: FormatType) {
 function handleError(res: Response, err: unknown, fallback: string) {
     const message = err instanceof Error ? err.message : fallback;
     console.error(err);
-    const status = /already exists/i.test(message) ? 409 : 400;
-    return res.status(status).json({ error: message });
+    const statusCode =
+        typeof err === 'object' && err && 'status' in err && typeof (err as { status: unknown }).status === 'number'
+            ? (err as { status: number }).status
+            : /already exists/i.test(message)
+              ? 409
+              : 400;
+    return res.status(statusCode).json({ error: message });
 }
 
 async function filterAuthorized<T>(
@@ -355,7 +393,9 @@ app.get('/v1/agent-profiles/:id/relevant-facts', requireAuth('read'), async (req
     const apiKey = getApiKey(req);
 
     try {
+        const registry = await resolveRequestRegistry(req);
         const relevance = await findRelevantFacts({
+            registry_name: registry,
             profile_id: req.params.id,
             namespace: getQueryString(req, 'namespace'),
             subject: getQueryString(req, 'subject'),
@@ -392,7 +432,9 @@ app.get('/v1/agent-profiles/:id/pull', requireAuth('read'), async (req: Request,
     const apiKey = getApiKey(req);
 
     try {
+        const registry = await resolveRequestRegistry(req);
         const relevance = await pullFactsForAgent({
+            registry_name: registry,
             profile_id: req.params.id,
             namespace: getQueryString(req, 'namespace'),
             subject: getQueryString(req, 'subject'),
@@ -436,7 +478,8 @@ app.put('/v1/agent-profiles/:id', requireAuth('write'), createOrUpdateAgentProfi
 
 app.post('/v1/agent-profiles/:id/facts/:namespace/:key', requireAuth('write'), async (req: Request, res: Response) => {
     try {
-        const result = await proposeFactFromProfile(req.params.id, req.params.namespace, req.params.key, bodyAsRecord(req));
+        const registry = await resolveRequestRegistry(req);
+        const result = await proposeFactFromProfile(registry, req.params.id, req.params.namespace, req.params.key, bodyAsRecord(req));
         console.log(`[unifact] ${result.action}: ${req.params.namespace}/${req.params.key} from profile ${req.params.id}`);
         return res.json(result);
     } catch (err) {
@@ -468,7 +511,8 @@ app.get('/v1/facts/_search', requireAuth('read'), async (req: Request, res: Resp
     }
 
     try {
-        const matches = await searchFacts(query);
+        const registry = await resolveRequestRegistry(req);
+        const matches = await searchFacts(registry, query);
         const authorizedMatches = await filterAuthorized(matches, apiKey, match => match.namespace);
         const facts = authorizedMatches.map(factFromRow);
 
@@ -490,7 +534,9 @@ app.get('/v1/facts/_relevant', requireAuth('read'), async (req: Request, res: Re
     const apiKey = getApiKey(req);
 
     try {
+        const registry = await resolveRequestRegistry(req);
         const relevance = await findRelevantFacts({
+            registry_name: registry,
             profile_id: getQueryString(req, 'profile_id'),
             namespace: getQueryString(req, 'namespace'),
             subject: getQueryString(req, 'subject'),
@@ -526,7 +572,9 @@ app.get('/v1/facts/_review-queue', requireAuth('read'), async (req: Request, res
     const apiKey = getApiKey(req);
 
     try {
+        const registry = await resolveRequestRegistry(req);
         const queue = await listReviewQueue({
+            registry_name: registry,
             namespace: getQueryString(req, 'namespace'),
             limit: getQueryNumber(req, 'limit')
         });
@@ -545,7 +593,8 @@ app.get('/v1/facts/:namespace/:key/versions', requireAuth('read'), async (req: R
     const { namespace, key } = req.params;
 
     try {
-        const versions = await listFactVersions(namespace, key);
+        const registry = await resolveRequestRegistry(req);
+        const versions = await listFactVersions(registry, namespace, key);
         return res.json({ namespace, key, versions, count: versions.length });
     } catch (err) {
         return handleError(res, err, 'Failed to load fact versions');
@@ -556,7 +605,8 @@ app.post('/v1/facts/:namespace/:key/review', requireAuth('write'), async (req: R
     const { namespace, key } = req.params;
 
     try {
-        return res.json(await reviewFact(namespace, key, bodyAsRecord(req)));
+        const registry = await resolveRequestRegistry(req);
+        return res.json(await reviewFact(registry, namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to review fact');
     }
@@ -566,7 +616,8 @@ app.post('/v1/facts/:namespace/:key/approve', requireAuth('write'), async (req: 
     const { namespace, key } = req.params;
 
     try {
-        return res.json(await approveFact(namespace, key, bodyAsRecord(req)));
+        const registry = await resolveRequestRegistry(req);
+        return res.json(await approveFact(registry, namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to approve fact');
     }
@@ -576,7 +627,8 @@ app.post('/v1/facts/:namespace/:key/reject', requireAuth('write'), async (req: R
     const { namespace, key } = req.params;
 
     try {
-        return res.json(await rejectFact(namespace, key, bodyAsRecord(req)));
+        const registry = await resolveRequestRegistry(req);
+        return res.json(await rejectFact(registry, namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to reject fact');
     }
@@ -586,7 +638,8 @@ app.post('/v1/facts/:namespace/:key/publish', requireAuth('write'), async (req: 
     const { namespace, key } = req.params;
 
     try {
-        return res.json(await publishFact(namespace, key, bodyAsRecord(req)));
+        const registry = await resolveRequestRegistry(req);
+        return res.json(await publishFact(registry, namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to publish fact');
     }
@@ -596,7 +649,8 @@ app.post('/v1/facts/:namespace/:key/feedback', requireAuth('write'), async (req:
     const { namespace, key } = req.params;
 
     try {
-        return res.json(await feedbackFact(namespace, key, bodyAsRecord(req)));
+        const registry = await resolveRequestRegistry(req);
+        return res.json(await feedbackFact(registry, namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to open fact for feedback');
     }
@@ -606,7 +660,8 @@ app.post('/v1/facts/:namespace/:key/supersede', requireAuth('write'), async (req
     const { namespace, key } = req.params;
 
     try {
-        return res.json(await supersedeFact(namespace, key, bodyAsRecord(req)));
+        const registry = await resolveRequestRegistry(req);
+        return res.json(await supersedeFact(registry, namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to supersede fact');
     }
@@ -616,7 +671,8 @@ app.post('/v1/facts/:namespace/:key/retract', requireAuth('write'), async (req: 
     const { namespace, key } = req.params;
 
     try {
-        return res.json(await retractFact(namespace, key, bodyAsRecord(req)));
+        const registry = await resolveRequestRegistry(req);
+        return res.json(await retractFact(registry, namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to retract fact');
     }
@@ -625,13 +681,14 @@ app.get('/v1/facts/:namespace/:key/audit', requireAuth('read'), async (req: Requ
     const { namespace, key } = req.params;
 
     try {
+        const registry = await resolveRequestRegistry(req);
         const logs = await db.all<AuditLogRow>(`
-          SELECT id, action, namespace, key, old_value, new_value,
+          SELECT id, action, registry_name, namespace, key, old_value, new_value,
                  old_snapshot, new_snapshot, timestamp
           FROM audit_log
-          WHERE namespace = ? AND key = ?
+          WHERE registry_name = ? AND namespace = ? AND key = ?
           ORDER BY timestamp DESC
-        `, [namespace, key]);
+        `, [registry, namespace, key]);
 
         return res.json({
             namespace,
@@ -650,7 +707,8 @@ app.get('/v1/facts/:namespace/:key', requireAuth('read'), async (req: Request, r
     const format = getFormat(req);
 
     try {
-        const row = await getFactRow(namespace, key);
+        const registry = await resolveRequestRegistry(req);
+        const row = await getFactRow(registry, namespace, key);
         if (!row) {
             return res.status(404).json({ error: `Fact '${key}' not found in namespace '${namespace}'` });
         }
@@ -672,10 +730,11 @@ app.get('/v1/facts/:namespace', requireAuth('read'), async (req: Request, res: R
     const format = getFormat(req);
 
     try {
+        const registry = await resolveRequestRegistry(req);
         const registryChannel = getQueryString(req, 'registry_channel');
         const rows = registryChannel
-            ? (await listFacts(namespace)).filter(row => row.registry_channel === registryChannel)
-            : await listFacts(namespace);
+            ? (await listFacts(registry, namespace)).filter(row => row.registry_channel === registryChannel)
+            : await listFacts(registry, namespace);
         const facts = rows.map(factFromRow);
 
         if (format === 'json' && wantsMetadata(req)) {
@@ -705,8 +764,9 @@ app.post('/v1/facts/_batch', async (req: Request, res: Response) => {
     }
 
     try {
+        const registry = await resolveRequestRegistry(req);
         const facts = (await Promise.all(
-            namespaces.map(async namespace => (await listFacts(String(namespace))).map(factFromRow))
+            namespaces.map(async namespace => (await listFacts(registry, String(namespace))).map(factFromRow))
         )).flat();
 
         if (format === 'json' && wantsMetadata(req)) {
@@ -724,7 +784,8 @@ const createOrUpdateFact = async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        const result = await upsertFact(namespace, key, bodyAsRecord(req));
+        const registry = await resolveRequestRegistry(req);
+        const result = await upsertFact(registry, namespace, key, bodyAsRecord(req));
         console.log(`[unifact] ${result.action}: ${namespace}/${key}`);
         return res.json(result);
     } catch (err) {
@@ -739,7 +800,8 @@ app.delete('/v1/facts/:namespace/:key', requireAuth('write'), async (req: Reques
     const { namespace, key } = req.params;
 
     try {
-        const deleted = await deleteFact(namespace, key);
+        const registry = await resolveRequestRegistry(req);
+        const deleted = await deleteFact(registry, namespace, key);
         if (!deleted) {
             return res.status(404).json({ error: `Fact '${key}' not found in namespace '${namespace}'` });
         }

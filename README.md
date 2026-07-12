@@ -150,7 +150,7 @@ uni approve Unifact --person alice --by admin
 uni suspend Unifact --person alice --by admin   # pause
 uni approve Unifact --person alice --by admin   # restore
 uni registries
-uni requests Unifact
+uni team Unifact
 ```
 
 Optional: `uni join staging.unifact.ai/Unifact --person alice` posts the join request to that host.

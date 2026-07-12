@@ -1,4 +1,6 @@
 import { upsertAgentProfile, upsertFact } from './store.js';
+import { getRegistry, initRegistry, requireWorkingRegistry } from './registry.js';
+import { getActiveLocalApiKey } from './keys.js';
 
 interface SeedFact extends Record<string, unknown> {
     namespace: string;
@@ -306,7 +308,7 @@ const SEED_FACTS: SeedFact[] = [
         namespace: 'company.infrastructure',
         key: 'upstream-registry-url',
         value: 'https://staging.unifact.ai',
-        description: 'Cloud-neutral upstream Unifact registry URL for proposed fact review and published fact pulls. Tenant is inferred from API key rather than URL path.',
+        description: 'Upstream Unifact registry URL for pull/push and org mirror. Staging uses Lets Encrypt TLS (see company.infrastructure/staging-tls).',
         fact_type: 'entity_fact',
         subject: 'unifact-registry',
         scope: 'infrastructure',
@@ -331,6 +333,182 @@ const SEED_FACTS: SeedFact[] = [
         audience: ['general-agent', 'builder-agent', 'coding-agent', 'operations-agent'],
         relevance_tags: ['infrastructure', 'staging', 'upstream-registry'],
         priority: 'normal',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.infrastructure',
+        key: 'staging-host-ip',
+        value: '98.89.187.199',
+        description: 'Public A record target for staging.unifact.ai (Lightsail compute).',
+        fact_type: 'entity_fact',
+        subject: 'unifact-staging',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'informational',
+        audience: ['operations-agent', 'coding-agent', 'builder-agent'],
+        relevance_tags: ['infrastructure', 'staging', 'lightsail', 'deploy'],
+        priority: 'high',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.infrastructure',
+        key: 'staging-ssh-user',
+        value: 'admin',
+        description: 'SSH login user on staging.unifact.ai (Lightsail Node instance). Not ubuntu/ec2-user.',
+        fact_type: 'entity_fact',
+        subject: 'unifact-staging',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'informational',
+        audience: ['operations-agent', 'coding-agent', 'builder-agent'],
+        relevance_tags: ['infrastructure', 'staging', 'ssh', 'deploy'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.infrastructure',
+        key: 'staging-ssh-key-path',
+        value: 'C:\\Users\\admin\\git\\LightsailDefaultKey-us-east-1.pem',
+        description: 'Path to the Lightsail default SSH private key on the operator laptop (under the git parent folder). Store the PATH only — never commit PEM contents into the UniFact repo.',
+        fact_type: 'entity_fact',
+        subject: 'unifact-staging',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'informational',
+        audience: ['operations-agent', 'coding-agent', 'builder-agent'],
+        relevance_tags: ['infrastructure', 'staging', 'ssh', 'pem', 'deploy', 'secrets-path'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.infrastructure',
+        key: 'staging-app-dir',
+        value: '/var/www/unifact',
+        description: 'UniFact origin app directory on staging. Runs dist/api.js under pm2 name unifact. Host has no git — deploy by syncing built files.',
+        fact_type: 'entity_fact',
+        subject: 'unifact-staging',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'informational',
+        audience: ['operations-agent', 'coding-agent', 'builder-agent'],
+        relevance_tags: ['infrastructure', 'staging', 'deploy', 'pm2'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.infrastructure',
+        key: 'staging-process-manager',
+        value: 'pm2 (root) — app name unifact; ecosystem.config.cjs loads .env; restart with: sudo pm2 restart unifact && sudo pm2 save',
+        description: 'Process supervision for staging UniFact API. pm2-root.service keeps processes across reboot.',
+        fact_type: 'entity_fact',
+        subject: 'unifact-staging',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'informational',
+        audience: ['operations-agent', 'coding-agent'],
+        relevance_tags: ['infrastructure', 'staging', 'pm2', 'deploy'],
+        priority: 'high',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.infrastructure',
+        key: 'unifact-local-repo',
+        value: 'C:\\Users\\admin\\git\\unifact',
+        description: 'Operator laptop checkout of the UniFact engine repo used to build and deploy staging.',
+        fact_type: 'entity_fact',
+        subject: 'unifact',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'informational',
+        audience: ['operations-agent', 'coding-agent', 'builder-agent'],
+        relevance_tags: ['infrastructure', 'deploy', 'repo'],
+        priority: 'high',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.infrastructure',
+        key: 'unifact-github-remote',
+        value: 'https://github.com/baskcart/unifact.git',
+        description: 'Canonical GitHub remote for UniFact (git remote name often unifact).',
+        fact_type: 'entity_fact',
+        subject: 'unifact',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'informational',
+        audience: ['operations-agent', 'coding-agent', 'builder-agent'],
+        relevance_tags: ['infrastructure', 'github', 'deploy'],
+        priority: 'normal',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.infrastructure',
+        key: 'unifact-deploy-script',
+        value: 'scripts/deploy-staging.ps1 (Windows) or scripts/deploy-staging.sh (bash)',
+        description: 'Deploy scripts in the UniFact repo. Build locally, sync to staging-app-dir (preserve .env), npm install --omit=dev, sudo pm2 restart unifact.',
+        fact_type: 'entity_fact',
+        subject: 'unifact-staging',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'informational',
+        audience: ['operations-agent', 'coding-agent', 'builder-agent'],
+        relevance_tags: ['infrastructure', 'staging', 'deploy', 'script'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.infrastructure',
+        key: 'staging-proxy',
+        value: 'Co-hosted nodeapp (pm2 name nodeapp, /var/www/nodeapp) fronts HTTP(S); UniFact API listens on 127.0.0.1:4110. Optional scripts/lightsail-proxy.js pattern: 80/443 → 4110.',
+        description: 'How external traffic reaches UniFact on staging.',
+        fact_type: 'entity_fact',
+        subject: 'unifact-staging',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'informational',
+        audience: ['operations-agent', 'coding-agent'],
+        relevance_tags: ['infrastructure', 'staging', 'proxy', 'tls'],
+        priority: 'normal',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.decisions',
+        key: 'unifact-staging-deploy',
+        value: 'Deploy staging by building on the operator laptop, syncing artifacts to /var/www/unifact (never overwrite .env), npm install on host, sudo pm2 restart unifact. Staging has no git binary — do not rely on git pull on the server.',
+        description: 'Operational deploy procedure for staging.unifact.ai. SSH as admin with LightsailDefaultKey-us-east-1.pem. Scripts: scripts/deploy-staging.ps1 / scripts/deploy-staging.sh.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['operations-agent', 'coding-agent', 'builder-agent'],
+        relevance_tags: ['deploy', 'staging', 'pm2', 'lightsail', 'procedure'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.constraints',
+        key: 'unifact-pem-path-only',
+        value: 'Record SSH PEM file PATH as a fact (company.infrastructure/staging-ssh-key-path). Never commit the PEM file or paste private key material into the repo, chat logs, or published fact values.',
+        description: 'Security constraint for operator credentials used to deploy UniFact staging.',
+        fact_type: 'constraint_fact',
+        subject: 'unifact-staging',
+        scope: 'security',
+        derivation: 'asserted',
+        actionability: 'blocks_action',
+        audience: ['operations-agent', 'coding-agent', 'builder-agent'],
+        relevance_tags: ['security', 'pem', 'secrets', 'deploy'],
+        priority: 'critical',
         approval_status: 'approved',
         created_by: 'seed'
     }
@@ -438,9 +616,29 @@ const SEED_AGENT_PROFILES: SeedAgentProfile[] = [
 async function runSeed() {
     console.log('Seeding UniFact baseline facts and agent profiles...');
 
+    let registryName: string;
+    try {
+        registryName = await requireWorkingRegistry((await getActiveLocalApiKey())?.person ?? null);
+    } catch {
+        const existing = await getRegistry('Unifact');
+        if (existing) {
+            registryName = existing.name;
+        } else {
+            const person = (await getActiveLocalApiKey())?.person ?? 'seed';
+            const created = await initRegistry({
+                name: 'Unifact',
+                person,
+                description: 'Default seed registry',
+                syncRemote: false
+            });
+            registryName = created.registry.name;
+            console.log(`Initialized registry '${registryName}' for seeding`);
+        }
+    }
+
     for (const item of SEED_FACTS) {
         const { namespace, key, ...input } = item;
-        const result = await upsertFact(namespace, key, {
+        const result = await upsertFact(registryName, namespace, key, {
             ...input,
             registry_channel: 'published',
             published_by: 'seed',

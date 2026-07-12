@@ -87,6 +87,7 @@ export type FactPriority = typeof FACT_PRIORITIES[number];
 export type FactApprovalStatus = typeof FACT_APPROVAL_STATUSES[number];
 
 export interface FactResponse {
+    registry_name: string;
     namespace: string;
     key: string;
     value: string;
@@ -125,6 +126,7 @@ export interface FactResponse {
 
 export interface FactVersionResponse {
     id: number;
+    registry_name: string;
     namespace: string;
     key: string;
     version: number;

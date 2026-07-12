@@ -90,18 +90,16 @@ export async function getActiveLocalApiKey(): Promise<ApiKeyRecord | undefined> 
     return row ? rowToRecord(row) : undefined;
 }
 
-/** Switch CLI identity to this person (must already hold their local key). */
+/** Switch CLI identity to this person. Creates a local key if none exists yet. */
 export async function usePerson(person: string): Promise<ApiKeyRecord> {
     const name = person.trim();
     if (!name) throw new Error('person is required');
 
-    const existing = await getApiKeyByPerson(name);
+    let existing = await getApiKeyByPerson(name);
     if (!existing) {
-        throw new Error(
-            `No local key for '${name}'. ` +
-                `Create an org (uni init), or join then get approved (uni join → owner approve), ` +
-                `or install a key: uni key create --person ${name} --api-key <secret>`
-        );
+        // Claim a local identity (name ≈ user id, generated key ≈ password).
+        // Origin sync still happens on uni init / uni approve — not here.
+        existing = await createApiKey({ person: name, namespaces: ['*'], enabled: true });
     }
     if (!existing.enabled) {
         throw new Error(
@@ -113,17 +111,6 @@ export async function usePerson(person: string): Promise<ApiKeyRecord> {
     const updated = await getApiKeyByPerson(name);
     if (!updated) throw new Error(`Failed to switch to '${name}'`);
     return updated;
-}
-
-/**
- * Ensure a local person key exists for join (one-machine friendly).
- * Generates a new secret if missing — remote sync happens on approve.
- */
-export async function ensureLocalPersonKey(person: string): Promise<ApiKeyRecord> {
-    const name = person.trim();
-    const existing = await getApiKeyByPerson(name);
-    if (existing) return existing;
-    return createApiKey({ person: name, namespaces: ['*'], enabled: true });
 }
 
 export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyRecord> {

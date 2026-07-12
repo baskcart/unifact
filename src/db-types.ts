@@ -20,6 +20,7 @@ export interface DbClient {
 
 export interface FactRow {
     rowid: number;
+    registry_name: string;
     namespace: string;
     key: string;
     value: string;
@@ -59,6 +60,7 @@ export interface FactRow {
 export interface AuditLogRow {
     id: number;
     action: string;
+    registry_name?: string;
     namespace: string;
     key: string;
     old_value: string | null;
@@ -89,6 +91,7 @@ export interface AgentProfileRow {
 
 export interface FactVersionRow {
     id: number;
+    registry_name: string;
     namespace: string;
     key: string;
     version: number;

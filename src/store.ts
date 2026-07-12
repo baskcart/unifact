@@ -30,7 +30,7 @@ import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
 import { apiKeyAllowsNamespace, findApiKeyBySecret, listApiKeys } from './keys.js';
 
 export const FACT_SELECT_COLUMNS = `
-  rowid, namespace, key, value, description, fact_type, subject, scope, status,
+  rowid, registry_name, namespace, key, value, description, fact_type, subject, scope, status,
   derivation, confidence, source, evidence, valid_from, valid_until,
   observed_at, time_period, audience, relevance_tags, actionability, owner,
   priority, related_facts, created_by, approved_by, approval_status,
@@ -107,6 +107,7 @@ export interface UpsertAgentProfileResult {
 }
 
 export interface RelevantFactQuery {
+    registry_name: string;
     profile_id?: string;
     namespace?: string;
     subject?: string;
@@ -236,6 +237,7 @@ function buildAgentProfileColumns(id: string, input: InputRecord, existing?: Age
 
 export function factFromRow(row: FactRow): FactResponse {
     return {
+        registry_name: row.registry_name,
         namespace: row.namespace,
         key: row.key,
         value: row.value,
@@ -294,56 +296,58 @@ export function agentProfileFromRow(row: AgentProfileRow): AgentProfileResponse 
     };
 }
 
-export async function getFactRow(namespace: string, key: string): Promise<FactRow | undefined> {
+export async function getFactRow(registryName: string, namespace: string, key: string): Promise<FactRow | undefined> {
     return db.get<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
-      WHERE namespace = ? AND key = ?
-    `, [namespace, key]);
+      WHERE registry_name = ? AND namespace = ? AND key = ?
+    `, [registryName, namespace, key]);
 }
 
-export async function listFacts(namespace: string): Promise<FactRow[]> {
+export async function listFacts(registryName: string, namespace: string): Promise<FactRow[]> {
     return db.all<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
-      WHERE namespace = ?
+      WHERE registry_name = ? AND namespace = ?
       ORDER BY key
-    `, [namespace]);
+    `, [registryName, namespace]);
 }
 
-export async function listFactNamespaces(): Promise<string[]> {
+export async function listFactNamespaces(registryName: string): Promise<string[]> {
     const rows = await db.all<{ namespace: string }>(`
       SELECT DISTINCT namespace
       FROM facts
+      WHERE registry_name = ?
       ORDER BY namespace
-    `);
+    `, [registryName]);
     return rows.map((row) => row.namespace);
 }
 
-export async function listFactsByChannels(channels: string[]): Promise<FactResponse[]> {
+export async function listFactsByChannels(registryName: string, channels: string[]): Promise<FactResponse[]> {
     if (channels.length === 0) return [];
     const placeholders = channels.map(() => '?').join(', ');
     const rows = await db.all<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
-      WHERE registry_channel IN (${placeholders})
+      WHERE registry_name = ? AND registry_channel IN (${placeholders})
       ORDER BY namespace, key
-    `, channels);
+    `, [registryName, ...channels]);
     return rows.map(factFromRow);
 }
 
-export async function searchFacts(query: string): Promise<FactRow[]> {
+export async function searchFacts(registryName: string, query: string): Promise<FactRow[]> {
     return db.all<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
-      WHERE ${db.factSearchClause()}
+      WHERE registry_name = ? AND ${db.factSearchClause()}
       ORDER BY namespace, key
-    `, [query]);
+    `, [registryName, query]);
 }
 
 export function factVersionFromRow(row: FactVersionRow): FactVersionResponse {
     return {
         id: row.id,
+        registry_name: row.registry_name,
         namespace: row.namespace,
         key: row.key,
         version: row.version,
@@ -359,11 +363,12 @@ export function factVersionFromRow(row: FactVersionRow): FactVersionResponse {
 async function recordFactVersion(row: FactRow, event: string, author: string | null, changeReason: string | null, now: number) {
     await db.run(`
       INSERT INTO fact_versions (
-        namespace, key, version, event, registry_channel, snapshot,
+        registry_name, namespace, key, version, event, registry_channel, snapshot,
         author, change_reason, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
+        row.registry_name,
         row.namespace,
         row.key,
         row.version,
@@ -387,22 +392,22 @@ function versionAuthor(columns: FactColumns): string | null {
     return columns.published_by ?? columns.approved_by ?? columns.created_by;
 }
 
-export async function listFactVersions(namespace: string, key: string): Promise<FactVersionResponse[]> {
+export async function listFactVersions(registryName: string, namespace: string, key: string): Promise<FactVersionResponse[]> {
     const rows = await db.all<FactVersionRow>(`
-      SELECT id, namespace, key, version, event, registry_channel,
+      SELECT id, registry_name, namespace, key, version, event, registry_channel,
              snapshot, author, change_reason, created_at
       FROM fact_versions
-      WHERE namespace = ? AND key = ?
+      WHERE registry_name = ? AND namespace = ? AND key = ?
       ORDER BY id DESC
-    `, [namespace, key]);
+    `, [registryName, namespace, key]);
 
     return rows.map(factVersionFromRow);
 }
 
-export async function upsertFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+export async function upsertFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const storedValue = serializeValue(input.value);
     const now = Date.now();
-    const existing = await getFactRow(namespace, key);
+    const existing = await getFactRow(registryName, namespace, key);
     const columns = buildFactColumns(input, existing);
     const action: 'CREATE' | 'UPDATE' = existing ? 'UPDATE' : 'CREATE';
     const event = requestedVersionEvent(input, action);
@@ -421,7 +426,7 @@ export async function upsertFact(namespace: string, key: string, input: InputRec
                   approval_status = ?, registry_channel = ?, version = ?, published_at = ?,
                   published_by = ?, change_reason = ?, supersedes = ?, superseded_by = ?,
                   updated_at = ?
-              WHERE namespace = ? AND key = ?
+              WHERE registry_name = ? AND namespace = ? AND key = ?
             `, [
                 storedValue,
                 columns.description,
@@ -454,13 +459,14 @@ export async function upsertFact(namespace: string, key: string, input: InputRec
                 columns.supersedes,
                 columns.superseded_by,
                 now,
+                registryName,
                 namespace,
                 key
             ]);
         } else {
             await db.run(`
               INSERT INTO facts (
-                namespace, key, value, description, fact_type, subject, scope,
+                registry_name, namespace, key, value, description, fact_type, subject, scope,
                 status, derivation, confidence, source, evidence, valid_from,
                 valid_until, observed_at, time_period, audience, relevance_tags,
                 actionability, owner, priority, related_facts, created_by,
@@ -468,8 +474,9 @@ export async function upsertFact(namespace: string, key: string, input: InputRec
                 published_at, published_by, change_reason, supersedes,
                 superseded_by, created_at, updated_at
               )
-              VALUES (${Array(34).fill('?').join(', ')})
+              VALUES (${Array(35).fill('?').join(', ')})
             `, [
+                registryName,
                 namespace,
                 key,
                 storedValue,
@@ -507,19 +514,20 @@ export async function upsertFact(namespace: string, key: string, input: InputRec
             ]);
         }
 
-        const savedRow = await getFactRow(namespace, key);
+        const savedRow = await getFactRow(registryName, namespace, key);
         if (!savedRow) {
             throw new Error(`Failed to load saved fact '${namespace}/${key}'`);
         }
 
         await db.run(`
           INSERT INTO audit_log (
-            action, namespace, key, old_value, new_value, old_snapshot,
+            action, registry_name, namespace, key, old_value, new_value, old_snapshot,
             new_snapshot, timestamp
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
             action,
+            registryName,
             namespace,
             key,
             existing?.value ?? null,
@@ -540,8 +548,8 @@ export async function upsertFact(namespace: string, key: string, input: InputRec
     };
 }
 
-export async function deleteFact(namespace: string, key: string): Promise<boolean> {
-    const existing = await getFactRow(namespace, key);
+export async function deleteFact(registryName: string, namespace: string, key: string): Promise<boolean> {
+    const existing = await getFactRow(registryName, namespace, key);
     if (!existing) {
         return false;
     }
@@ -549,14 +557,14 @@ export async function deleteFact(namespace: string, key: string): Promise<boolea
     const now = Date.now();
     await db.transaction(async () => {
         await recordFactVersion(existing, 'delete', existing.created_by, existing.change_reason, now);
-        await db.run('DELETE FROM facts WHERE namespace = ? AND key = ?', [namespace, key]);
+        await db.run('DELETE FROM facts WHERE registry_name = ? AND namespace = ? AND key = ?', [registryName, namespace, key]);
         await db.run(`
           INSERT INTO audit_log (
-            action, namespace, key, old_value, new_value, old_snapshot,
+            action, registry_name, namespace, key, old_value, new_value, old_snapshot,
             new_snapshot, timestamp
           )
-          VALUES ('DELETE', ?, ?, ?, NULL, ?, NULL, ?)
-        `, [namespace, key, existing.value, JSON.stringify(factFromRow(existing)), now]);
+          VALUES ('DELETE', ?, ?, ?, ?, NULL, ?, NULL, ?)
+        `, [registryName, namespace, key, existing.value, JSON.stringify(factFromRow(existing)), now]);
     });
 
     return true;
@@ -820,8 +828,8 @@ export async function findRelevantFacts(query: RelevantFactQuery): Promise<{ pro
     }
 
     const profile = profileRow ? agentProfileFromRow(profileRow) : null;
-    const clauses: string[] = [];
-    const params: unknown[] = [];
+    const clauses: string[] = ['registry_name = ?'];
+    const params: unknown[] = [query.registry_name];
 
     if (query.query) {
         clauses.push(db.factSearchClause());
@@ -865,7 +873,7 @@ export async function findRelevantFacts(query: RelevantFactQuery): Promise<{ pro
         clauses.push(query.include_review ? "status IN ('active', 'needs_review')" : "status = 'active'");
     }
 
-    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const where = `WHERE ${clauses.join(' AND ')}`;
     const rows = await db.all<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
@@ -886,7 +894,7 @@ export async function findRelevantFacts(query: RelevantFactQuery): Promise<{ pro
     };
 }
 
-export async function proposeFactFromProfile(profileId: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+export async function proposeFactFromProfile(registryName: string, profileId: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const profileRow = await getAgentProfileRow(profileId);
     if (!profileRow) {
         throw new Error(`Agent profile '${profileId}' not found`);
@@ -923,16 +931,16 @@ export async function proposeFactFromProfile(profileId: string, namespace: strin
         proposed.approved_by = profile.id;
     }
 
-    return upsertFact(namespace, key, proposed);
+    return upsertFact(registryName, namespace, key, proposed);
 }
 
-async function transitionFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
-    const existing = await getFactRow(namespace, key);
+async function transitionFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+    const existing = await getFactRow(registryName, namespace, key);
     if (!existing) {
         throw new Error(`Fact '${key}' not found in namespace '${namespace}'`);
     }
 
-    return upsertFact(namespace, key, {
+    return upsertFact(registryName, namespace, key, {
         ...input,
         value: hasOwn(input, 'value') ? input.value : existing.value,
         description: hasOwn(input, 'description') ? input.description : existing.description,
@@ -966,11 +974,11 @@ async function transitionFact(namespace: string, key: string, input: InputRecord
     });
 }
 
-export async function reviewFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+export async function reviewFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const approved = hasOwn(input, 'approved') ? normalizeBoolean(input.approved, 'approved') : true;
     const reviewer = normalizeNullableString(input.reviewed_by ?? input.approved_by, 'reviewed_by');
 
-    return transitionFact(namespace, key, {
+    return transitionFact(registryName, namespace, key, {
         ...input,
         registry_channel: approved ? 'review' : 'retracted',
         status: approved ? 'needs_review' : 'retracted',
@@ -980,11 +988,11 @@ export async function reviewFact(namespace: string, key: string, input: InputRec
     });
 }
 
-export async function publishFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+export async function publishFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const now = Date.now();
     const publisher = normalizeNullableString(input.published_by ?? input.approved_by, 'published_by');
 
-    return transitionFact(namespace, key, {
+    return transitionFact(registryName, namespace, key, {
         ...input,
         registry_channel: 'published',
         status: 'active',
@@ -997,13 +1005,13 @@ export async function publishFact(namespace: string, key: string, input: InputRe
 }
 
 /** Owner opens a fact for shared comments — visible to local agents, not production truth. */
-export async function feedbackFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+export async function feedbackFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const actor = normalizeNullableString(
         input.published_by ?? input.approved_by ?? input.reviewed_by ?? input.created_by,
         'published_by'
     );
 
-    return transitionFact(namespace, key, {
+    return transitionFact(registryName, namespace, key, {
         ...input,
         registry_channel: 'feedback',
         status: 'needs_review',
@@ -1014,8 +1022,8 @@ export async function feedbackFact(namespace: string, key: string, input: InputR
     });
 }
 
-export async function retractFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
-    return transitionFact(namespace, key, {
+export async function retractFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+    return transitionFact(registryName, namespace, key, {
         ...input,
         registry_channel: 'retracted',
         status: 'retracted',
@@ -1024,10 +1032,10 @@ export async function retractFact(namespace: string, key: string, input: InputRe
     });
 }
 
-export async function supersedeFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+export async function supersedeFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const supersededBy = normalizeRequiredString(input.superseded_by, 'superseded_by');
 
-    return transitionFact(namespace, key, {
+    return transitionFact(registryName, namespace, key, {
         ...input,
         registry_channel: 'superseded',
         status: 'superseded',
@@ -1052,6 +1060,7 @@ export async function pullFactsForAgent(query: RelevantFactQuery): Promise<{ pro
 }
 
 export interface ReviewQueueQuery {
+    registry_name: string;
     namespace?: string;
     limit?: number;
 }
@@ -1078,9 +1087,9 @@ export interface RegistryMetadata {
     };
 }
 
-export async function listReviewQueue(query: ReviewQueueQuery = {}): Promise<ReviewQueueResult> {
-    const clauses = ["registry_channel IN ('proposed', 'review', 'feedback')"];
-    const params: unknown[] = [];
+export async function listReviewQueue(query: ReviewQueueQuery): Promise<ReviewQueueResult> {
+    const clauses = ["registry_name = ?", "registry_channel IN ('proposed', 'review', 'feedback')"];
+    const params: unknown[] = [query.registry_name];
 
     if (query.namespace) {
         clauses.push('namespace = ?');
@@ -1109,30 +1118,30 @@ export async function listReviewQueue(query: ReviewQueueQuery = {}): Promise<Rev
     };
 }
 
-export async function approveFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+export async function approveFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const reviewer = normalizeNullableString(
         input.reviewed_by ?? input.approved_by ?? input.published_by,
         'reviewed_by'
     );
 
-    await reviewFact(namespace, key, {
+    await reviewFact(registryName, namespace, key, {
         ...input,
         approved: true,
         reviewed_by: reviewer,
         approved_by: reviewer
     });
 
-    return publishFact(namespace, key, {
+    return publishFact(registryName, namespace, key, {
         ...input,
         approved_by: reviewer,
         published_by: hasOwn(input, 'published_by') ? input.published_by : reviewer
     });
 }
 
-export async function rejectFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+export async function rejectFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const reviewer = normalizeNullableString(input.reviewed_by ?? input.approved_by, 'reviewed_by');
 
-    return transitionFact(namespace, key, {
+    return transitionFact(registryName, namespace, key, {
         ...input,
         registry_channel: 'retracted',
         status: 'retracted',
@@ -1245,6 +1254,28 @@ export interface SyncStatusResult {
     lastSync: number | null;
 }
 
+/** Resolve registry for pull/push from API key or active-registry fact. */
+async function resolveSyncRegistryName(person: string | null, apiKey: string | null): Promise<string> {
+    if (apiKey) {
+        const keyRecord = await findApiKeyBySecret(apiKey);
+        if (keyRecord?.registry_name) return keyRecord.registry_name;
+    }
+    if (person) {
+        const keys = await listApiKeys();
+        const match = keys.find((k) => k.person === person);
+        if (match?.registry_name) return match.registry_name;
+    }
+    const row = await db.get<{ value: string }>(`
+      SELECT value FROM facts
+      WHERE namespace = 'company.infrastructure' AND key = 'active-registry'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `);
+    const fromFact = row?.value?.trim();
+    if (fromFact) return fromFact;
+    throw new Error('No active registry. uni init <Registry> or uni join …');
+}
+
 /**
  * Pull published facts from origin.
  * Never pulls API keys — membership keys are push-only (via uni approve / uni suspend).
@@ -1259,6 +1290,8 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
     if (!remoteUrl) {
         throw new Error('Could not determine remote URL');
     }
+
+    const registryName = await resolveSyncRegistryName(config.person, config.apiKey);
 
     try {
         const targetNamespaces = namespaces || ['company.decisions', 'company.constraints', 'company.branding'];
@@ -1276,7 +1309,18 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
             });
 
             if (!response.ok) {
-                console.warn(`Failed to pull namespace ${namespace}: ${response.statusText}`);
+                const detail = await response.text().catch(() => '');
+                const hint = detail.slice(0, 200) || response.statusText;
+                console.warn(`Failed to pull namespace ${namespace}: ${response.status} ${hint}`);
+                if (response.status === 401) {
+                    console.warn(
+                        '  Hint: local API key secret does not match origin. Install the origin key or re-init with a new person.'
+                    );
+                } else if (response.status === 403) {
+                    console.warn(
+                        '  Hint: this key is known on origin but is not allowed to read that namespace.'
+                    );
+                }
                 continue;
             }
 
@@ -1284,7 +1328,7 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
             const remoteFacts = Array.isArray(data) ? data : (data.facts || []);
 
             for (const remoteFact of remoteFacts) {
-                const existing = await getFactRow(remoteFact.namespace, remoteFact.key);
+                const existing = await getFactRow(registryName, remoteFact.namespace, remoteFact.key);
 
                 if (existing) {
                     if (existing.version >= remoteFact.version) {
@@ -1297,7 +1341,7 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
                     }
                 }
 
-                const result = await upsertFact(remoteFact.namespace, remoteFact.key, remoteFact);
+                const result = await upsertFact(registryName, remoteFact.namespace, remoteFact.key, remoteFact);
                 pulled++;
                 pulledFacts.push(result.fact);
             }
@@ -1323,7 +1367,7 @@ export interface PushCollaborationContext {
     registryName: string | null;
 }
 
-/** Solo = at most one enabled person key. Owner = matches primary registry owner_person. */
+/** Solo = at most one enabled person key. Owner = matches person's registry owner_person. */
 export async function getPushCollaborationContext(
     person: string | null
 ): Promise<PushCollaborationContext> {
@@ -1332,9 +1376,26 @@ export async function getPushCollaborationContext(
     if (person) members.add(person);
     const memberCount = members.size;
 
-    const registry = await db.get<{ name: string; owner_person: string }>(`
-      SELECT name, owner_person FROM registries ORDER BY created_at ASC LIMIT 1
-    `);
+    let registryName: string | null = null;
+    if (person) {
+        const key = keys.find((k) => k.person === person);
+        registryName = key?.registry_name ?? null;
+    }
+    if (!registryName) {
+        const row = await db.get<{ value: string }>(`
+          SELECT value FROM facts
+          WHERE namespace = 'company.infrastructure' AND key = 'active-registry'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        `);
+        registryName = row?.value?.trim() || null;
+    }
+
+    const registry = registryName
+        ? await db.get<{ name: string; owner_person: string }>(`
+            SELECT name, owner_person FROM registries WHERE lower(name) = lower(?)
+          `, [registryName])
+        : null;
 
     const isOwner = registry ? !person || registry.owner_person === person : true;
 
@@ -1343,7 +1404,7 @@ export async function getPushCollaborationContext(
         isOwner,
         person,
         memberCount,
-        registryName: registry?.name ?? null
+        registryName: registry?.name ?? registryName
     };
 }
 
@@ -1390,13 +1451,15 @@ export async function pushFactsToRemote(selectors?: string[]): Promise<SyncPushR
         throw new Error('Could not determine remote URL');
     }
 
+    const registryName = await resolveSyncRegistryName(config.person, config.apiKey);
+
     try {
         const keyRecord = await findApiKeyBySecret(config.apiKey);
         const ctx = await getPushCollaborationContext(config.person);
         const parsed: PushSelector[] =
             selectors && selectors.length > 0
                 ? selectors.map(parsePushSelector)
-                : (await listFactNamespaces()).map((namespace) => ({
+                : (await listFactNamespaces(registryName)).map((namespace) => ({
                       kind: 'namespace' as const,
                       namespace
                   }));
@@ -1421,7 +1484,7 @@ export async function pushFactsToRemote(selectors?: string[]): Promise<SyncPushR
 
         for (const namespace of namespaces) {
             const nsSelectors = allowed.filter((s) => s.namespace === namespace);
-            const localFacts = (await listFacts(namespace)).filter(
+            const localFacts = (await listFacts(registryName, namespace)).filter(
                 (f) =>
                     pushableChannels.has(f.registry_channel) &&
                     nsSelectors.some((sel) => factMatchesSelector(f, sel))
@@ -1497,12 +1560,28 @@ export async function pushFactsToRemote(selectors?: string[]): Promise<SyncPushR
 
 export async function getSyncStatus(): Promise<SyncStatusResult> {
     const config = await getSyncConfig();
-    const localCount = await db.get<{ count: number }>('SELECT COUNT(*) as count FROM facts');
-    const reviewQueue = await db.get<{ count: number }>(`
-      SELECT COUNT(*) as count
-      FROM facts
-      WHERE registry_channel IN ('proposed', 'review', 'feedback')
-    `);
+    let registryName: string | null = null;
+    try {
+        registryName = await resolveSyncRegistryName(config.person, config.apiKey);
+    } catch {
+        registryName = null;
+    }
+
+    const localCount = registryName
+        ? await db.get<{ count: number }>('SELECT COUNT(*) as count FROM facts WHERE registry_name = ?', [registryName])
+        : await db.get<{ count: number }>('SELECT COUNT(*) as count FROM facts');
+    const reviewQueue = registryName
+        ? await db.get<{ count: number }>(`
+            SELECT COUNT(*) as count
+            FROM facts
+            WHERE registry_name = ?
+              AND registry_channel IN ('proposed', 'review', 'feedback')
+          `, [registryName])
+        : await db.get<{ count: number }>(`
+            SELECT COUNT(*) as count
+            FROM facts
+            WHERE registry_channel IN ('proposed', 'review', 'feedback')
+          `);
 
     return {
         enabled: config.enabled,

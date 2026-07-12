@@ -3,7 +3,6 @@ import 'dotenv/config';
 import { getMetadataFromGitUrl } from './git-metadata.js';
 import {
     createApiKey,
-    ensureLocalPersonKey,
     getActiveLocalApiKey,
     getApiKeyByPerson,
     listApiKeys,
@@ -12,13 +11,17 @@ import {
 } from './keys.js';
 import {
     approveJoin,
+    assertPersonMemberOfRegistry,
+    focusRegistry,
     getTeam,
     initRegistry,
-    listJoinRequests,
-    listRegistries,
+    listRegistriesForPerson,
     parseJoinTarget,
     requestJoin,
-    suspendJoin
+    requireWorkingRegistry,
+    resolveActiveRegistry,
+    suspendJoin,
+    type PersonRegistryMembership
 } from './registry.js';
 import { sanitizeFactKey, suggestFactKey } from './suggest-key.js';
 import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
@@ -59,6 +62,7 @@ async function main() {
             await initCommand(args);
             break;
         case 'whoami':
+        case 'who':
             await whoamiCommand();
             break;
         case 'use':
@@ -79,8 +83,8 @@ async function main() {
         case 'team':
             await teamCommand(args);
             break;
-        case 'requests':
-            await requestsCommand(args);
+        case 'facts':
+            await factsCommand(args);
             break;
         case 'pull':
             await pullCommand(args);
@@ -115,17 +119,17 @@ function printHelp() {
     console.log('  push [ns|ns/key|ns/pattern*]  — owner→feedback, others→review');
     console.log('');
     console.log('Identity (person name + key secret ≈ user id + password):');
-    console.log('  whoami');
-    console.log('  use <person>          # switch (must already hold that key)');
-    console.log('  use <person> --new    # claim a new local identity (then join)');
+    console.log('  whoami | who');
+    console.log('  use <person>     # switch; creates local key if first time');
     console.log('');
     console.log('Registry (membership):');
     console.log('  init <Registry> [--person you]   # person from context if omitted');
     console.log('  join <Registry|host/Registry>    # join as you (context)');
     console.log('  approve <Registry> [member]      # you (owner) approve member');
     console.log('  suspend <Registry> <member>      # you (owner) pause member');
-    console.log('  team [Registry]                  # owner, members, join requests');
-    console.log('  registries');
+    console.log('  team [Registry]                  # your registries only');
+    console.log('  facts [Registry]                 # list facts (prompt if many orgs)');
+    console.log('  registries                       # registries you own or belong to');
     console.log('');
     console.log('Sync:');
     console.log('  status | pull | push [selectors…]');
@@ -156,7 +160,7 @@ function hasFlag(argv: string[], name: string): boolean {
     return argv.includes(name);
 }
 
-const BOOLEAN_FLAGS = new Set(['--all', '--publish', '--new', '--pull']);
+const BOOLEAN_FLAGS = new Set(['--all', '--publish', '--pull']);
 
 function positionalArgs(argv: string[]): string[] {
     const out: string[] = [];
@@ -224,6 +228,12 @@ async function assertPersonAccess(person: string): Promise<void> {
     }
 }
 
+/** Working org for fact CLI commands (active person → requireWorkingRegistry). */
+async function resolveWorkingRegistry(person?: string): Promise<string> {
+    const who = person ?? (await resolvePerson([]));
+    return requireWorkingRegistry(who);
+}
+
 async function whoamiCommand() {
     try {
         const active = await getActiveLocalApiKey();
@@ -231,8 +241,23 @@ async function whoamiCommand() {
             console.log('No active person. uni init <Registry> --person you');
             return;
         }
+        const registry = await resolveActiveRegistry(active.person);
         console.log(`You are: ${active.person}`);
         console.log(`  Access: ${active.enabled ? 'on' : 'off'}`);
+        console.log(`  Active registry: ${registry || '(none — uni init or uni join)'}`);
+        if (registry) {
+            try {
+                const team = await getTeam(registry);
+                const me = team.members.find((m) => m.person === active.person);
+                const role =
+                    me?.status === 'owner' || me?.role === 'owner'
+                        ? 'owner'
+                        : me?.status || 'member';
+                console.log(`  Role: ${role}`);
+            } catch {
+                /* registry missing locally */
+            }
+        }
         console.log(`  Namespaces: ${active.namespaces.join(', ') || '(none)'}`);
         console.log('Switch: uni use <person>');
     } catch (error) {
@@ -244,15 +269,17 @@ async function whoamiCommand() {
 async function useCommand(argv: string[]) {
     const person = argv[0] || parseFlag(argv, '--person');
     if (!person) {
-        console.error('Usage: uni use <person> [--new]');
+        console.error('Usage: uni use <person>');
         process.exit(1);
     }
     try {
-        if (hasFlag(argv, '--new')) {
-            await ensureLocalPersonKey(person);
-        }
         const key = await usePerson(person);
+        if (key.registry_name) {
+            await focusRegistry(key.registry_name);
+        }
+        const registry = await resolveActiveRegistry(key.person);
         console.log(`Now acting as: ${key.person}`);
+        if (registry) console.log(`  Active registry: ${registry}`);
         console.log('(Auth = this person name + key secret. Role comes from org membership.)');
     } catch (error) {
         console.error('Use failed:', error instanceof Error ? error.message : String(error));
@@ -264,53 +291,76 @@ async function statusCommand() {
     try {
         const status = await getSyncStatus();
         const sync = await getSyncConfig();
-        const registries = await listRegistries();
-        const proposed = await listFactsByChannels(['proposed']);
-        const review = await listFactsByChannels(['review']);
-        const feedback = await listFactsByChannels(['feedback']);
-        const published = await listFactsByChannels(['published']);
-        const working = await listFactsByChannels(['working']);
-        console.log('Upstream status:');
+        const person = sync.person;
+        if (!person) {
+            console.log('No active person. uni use <person> or uni init <Registry>');
+            return;
+        }
+
+        const mine = await listRegistriesForPerson(person);
+        let activeReg = await resolveActiveRegistry(person);
+        if (activeReg && !mine.some((m) => m.registry.name === activeReg)) {
+            // Don't show an active registry the person does not belong to.
+            activeReg = mine[0]?.registry.name ?? null;
+        }
+        if (!activeReg && mine.length === 1) {
+            activeReg = mine[0].registry.name;
+        }
+
+        console.log('Identity:');
+        console.log(`  Person: ${person}`);
+        console.log(`  Active registry: ${activeReg || '(none)'}`);
+        console.log('');
+
+        console.log('Your registries:');
+        if (mine.length === 0) {
+            console.log('  (none — uni init <Registry> or uni join <Registry>)');
+        } else {
+            for (const row of mine) {
+                const mark = row.registry.name === activeReg ? '*' : ' ';
+                let teamCount = '';
+                try {
+                    const team = await getTeam(row.registry.name);
+                    teamCount = `  team=${team.members.length}`;
+                } catch {
+                    /* ignore */
+                }
+                console.log(
+                    ` ${mark} ${row.registry.name}  role=${row.role}  status=${row.status}${teamCount}`
+                );
+            }
+            console.log('  (* = active; uni use <person> focuses their org)');
+        }
+
+        if (activeReg) {
+            console.log('');
+            console.log(`Active: ${activeReg}`);
+            try {
+                const team = await getTeam(activeReg);
+                const me = team.members.find((m) => m.person === person);
+                const role =
+                    me?.status === 'owner' || me?.role === 'owner'
+                        ? 'owner'
+                        : me?.status || 'unknown';
+                console.log(`  Your role: ${role}`);
+                console.log(`  Owner: ${team.owner}`);
+                console.log('  Members:');
+                for (const m of team.members) {
+                    const label = m.status === 'owner' ? 'owner' : m.status;
+                    console.log(`    ${label.padEnd(10)} ${m.access.padEnd(4)}  ${m.person}`);
+                }
+                console.log(`  uni team ${activeReg}`);
+            } catch (error) {
+                console.log(
+                    `  (could not load team: ${error instanceof Error ? error.message : String(error)})`
+                );
+            }
+        }
+
+        console.log('');
+        console.log('Upstream:');
         console.log(`  Enabled: ${status.enabled}`);
         console.log(`  Upstream URL: ${status.upstreamUrl || 'Not configured'}`);
-        console.log(`  Person: ${sync.person || 'none'}`);
-        console.log(`  Local Facts: ${status.localFacts}`);
-        console.log(`  Proposed: ${proposed.length}`);
-        console.log(`  Review: ${review.length}`);
-        console.log(`  Feedback: ${feedback.length}`);
-        console.log(`  Published: ${published.length}`);
-        if (working.length > 0) {
-            console.log(`  Working (legacy): ${working.length}`);
-        }
-        console.log(`  Registries: ${registries.length ? registries.map(r => r.name).join(', ') : '(none — uni init <Name> --person you)'}`);
-        console.log('');
-        console.log('Local agents see: proposed + review + feedback + published');
-        console.log('Production agents see: published only');
-
-        const sections: Array<[string, typeof proposed]> = [
-            ['Proposed', proposed],
-            ['Review', review],
-            ['Feedback', feedback],
-            ['Published (sample)', published.slice(0, 10)]
-        ];
-        for (const [label, facts] of sections) {
-            if (facts.length === 0) continue;
-            console.log('');
-            console.log(`${label}:`);
-            for (const f of facts.slice(0, 20)) {
-                console.log(`  ${f.namespace}/${f.key}  ${f.value.slice(0, 72)}${f.value.length > 72 ? '…' : ''}`);
-            }
-            if (label.startsWith('Published') && published.length > 10) {
-                console.log(`  …and ${published.length - 10} more`);
-            }
-        }
-        if (working.length > 0) {
-            console.log('');
-            console.log('Working (legacy — prefer uni add → proposed):');
-            for (const f of working.slice(0, 10)) {
-                console.log(`  ${f.namespace}/${f.key}`);
-            }
-        }
     } catch (error) {
         console.error('Error:', error instanceof Error ? error.message : String(error));
         process.exit(1);
@@ -333,17 +383,18 @@ async function addCommand(argv: string[]) {
         const keyFlag = parseFlag(argv, '--key');
         const person = await resolvePerson(argv);
         await assertPersonAccess(person);
+        const registry = await resolveWorkingRegistry(person);
 
         const suggested = suggestFactKey(value, namespaceFlag);
         let key = keyFlag ? sanitizeFactKey(keyFlag) : suggested.key;
         if (!key) key = `fact_${Date.now().toString(36)}`;
 
-        const existing = await getFactRow(namespaceFlag, key);
+        const existing = await getFactRow(registry, namespaceFlag, key);
         if (existing && !keyFlag) {
             key = sanitizeFactKey(`${key}_v2`) || `${key}_2`;
         }
 
-        const result = await upsertFact(namespaceFlag, key, {
+        const result = await upsertFact(registry, namespaceFlag, key, {
             value,
             description: 'Added via uni add',
             fact_type: 'entity_fact',
@@ -377,12 +428,13 @@ async function addCommand(argv: string[]) {
 
 async function resolveFactTargets(
     argv: string[],
-    channels: string[]
+    channels: string[],
+    registryName: string
 ): Promise<Array<{ namespace: string; key: string }>> {
     const all = hasFlag(argv, '--all');
     const paths = positionalArgs(argv);
     if (all) {
-        const facts = await listFactsByChannels(channels);
+        const facts = await listFactsByChannels(registryName, channels);
         return facts.map((f) => ({ namespace: f.namespace, key: f.key }));
     }
     if (paths.length === 0) {
@@ -407,8 +459,9 @@ async function publishCommand(argv: string[]) {
     try {
         const person = await resolvePerson(argv);
         await assertPersonAccess(person);
+        const registry = await resolveWorkingRegistry(person);
         const allowed = await publishSourceChannels();
-        const targets = await resolveFactTargets(argv, allowed);
+        const targets = await resolveFactTargets(argv, allowed, registry);
         if (targets.length === 0) {
             console.log(
                 `Nothing to publish (need channel: ${allowed.join(' | ')}).`
@@ -418,7 +471,7 @@ async function publishCommand(argv: string[]) {
         }
         const ctx = await getPushCollaborationContext(person);
         for (const { namespace, key } of targets) {
-            const existing = await getFactRow(namespace, key);
+            const existing = await getFactRow(registry, namespace, key);
             if (!existing) {
                 console.error(`Fact not found: ${namespace}/${key}`);
                 process.exit(1);
@@ -436,7 +489,7 @@ async function publishCommand(argv: string[]) {
                 }
                 process.exit(1);
             }
-            const result = await publishFact(namespace, key, {
+            const result = await publishFact(registry, namespace, key, {
                 published_by: person,
                 approved_by: person,
                 change_reason: 'uni publish'
@@ -454,11 +507,12 @@ async function feedbackCommand(argv: string[]) {
     try {
         const person = await resolvePerson(argv);
         await assertPersonAccess(person);
+        const registry = await resolveWorkingRegistry(person);
         const all = hasFlag(argv, '--all');
         const paths = positionalArgs(argv);
         let targets: Array<{ namespace: string; key: string }> = [];
         if (all) {
-            const facts = await listFactsByChannels([
+            const facts = await listFactsByChannels(registry, [
                 'proposed',
                 'review',
                 'feedback',
@@ -475,12 +529,12 @@ async function feedbackCommand(argv: string[]) {
             return;
         }
         for (const { namespace, key } of targets) {
-            const existing = await getFactRow(namespace, key);
+            const existing = await getFactRow(registry, namespace, key);
             if (!existing) {
                 console.error(`Fact not found: ${namespace}/${key}`);
                 process.exit(1);
             }
-            const result = await feedbackFact(namespace, key, {
+            const result = await feedbackFact(registry, namespace, key, {
                 published_by: person,
                 approved_by: person,
                 change_reason: 'uni feedback'
@@ -504,11 +558,12 @@ async function commitCommand(argv: string[]) {
     }
     try {
         const person = await resolvePerson(argv);
+        const registry = await resolveWorkingRegistry(person);
         const all = hasFlag(argv, '--all');
         const paths = positionalArgs(argv);
         let targets: Array<{ namespace: string; key: string }> = [];
         if (all) {
-            const facts = await listFactsByChannels(['working']);
+            const facts = await listFactsByChannels(registry, ['working']);
             targets = facts.map((f) => ({ namespace: f.namespace, key: f.key }));
             if (targets.length === 0) {
                 console.log('No legacy working facts. Use: uni add "..." then uni publish …');
@@ -523,12 +578,12 @@ async function commitCommand(argv: string[]) {
         }
 
         for (const { namespace, key } of targets) {
-            const existing = await getFactRow(namespace, key);
+            const existing = await getFactRow(registry, namespace, key);
             if (!existing) {
                 console.error(`Fact not found: ${namespace}/${key}`);
                 process.exit(1);
             }
-            const result = await upsertFact(namespace, key, {
+            const result = await upsertFact(registry, namespace, key, {
                 value: existing.value,
                 description: existing.description,
                 fact_type: existing.fact_type,
@@ -734,15 +789,67 @@ async function suspendCommand(argv: string[]) {
     }
 }
 
+async function requireActivePerson(): Promise<string> {
+    const active = await getActiveLocalApiKey();
+    if (!active?.person) {
+        throw new Error('No active person. uni use <person> or uni init <Registry>');
+    }
+    return active.person;
+}
+
+/** Memberships for the active person; empty list is ok (caller messages). */
+async function myRegistries(): Promise<{ person: string; mine: PersonRegistryMembership[] }> {
+    const person = await requireActivePerson();
+    const mine = await listRegistriesForPerson(person);
+    return { person, mine };
+}
+
+/**
+ * Pick a registry the person belongs to.
+ * - explicit arg → must be a membership
+ * - one membership → that registry
+ * - many → print prompt and return null
+ * - none → throw
+ */
+async function resolveMemberRegistry(
+    argv: string[],
+    usage: string
+): Promise<{ person: string; registry: string } | null> {
+    const { person, mine } = await myRegistries();
+    if (mine.length === 0) {
+        throw new Error('No registries. Create one: uni init <Registry> — or join: uni join <Registry>');
+    }
+
+    const named = positionalArgs(argv)[0];
+    if (named) {
+        const membership = await assertPersonMemberOfRegistry(person, named);
+        return { person, registry: membership.registry.name };
+    }
+
+    if (mine.length === 1) {
+        return { person, registry: mine[0].registry.name };
+    }
+
+    console.log(`Usage: ${usage}`);
+    console.log('Your registries:');
+    for (const row of mine) {
+        console.log(`  ${row.registry.name}  role=${row.role}`);
+    }
+    return null;
+}
+
 async function registriesCommand() {
     try {
-        const registries = await listRegistries();
-        if (registries.length === 0) {
-            console.log('No registries. Create one: uni init Unifact --person you');
+        const { person, mine } = await myRegistries();
+        if (mine.length === 0) {
+            console.log(`No registries for '${person}'. Create one: uni init Unifact`);
             return;
         }
-        for (const r of registries) {
-            console.log(`${r.name}  owner=${r.owner_person}${r.description ? `  — ${r.description}` : ''}`);
+        for (const row of mine) {
+            const r = row.registry;
+            console.log(
+                `${r.name}  role=${row.role}  owner=${r.owner_person}${r.description ? `  — ${r.description}` : ''}`
+            );
         }
     } catch (error) {
         console.error('Error:', error instanceof Error ? error.message : String(error));
@@ -752,29 +859,82 @@ async function registriesCommand() {
 
 async function teamCommand(argv: string[]) {
     try {
-        const name = argv[0];
-        if (!name) {
-            const registries = await listRegistries();
-            if (registries.length === 0) {
-                console.log('No registries. Create one: uni init Unifact --person you');
-                return;
-            }
-            if (registries.length === 1) {
-                await printTeam(registries[0].name);
-                return;
-            }
-            console.log('Usage: uni team <Registry>');
-            console.log('Registries:');
-            for (const r of registries) {
-                console.log(`  ${r.name}  owner=${r.owner_person}`);
-            }
-            return;
-        }
-        await printTeam(name);
+        const picked = await resolveMemberRegistry(argv, 'uni team <Registry>');
+        if (!picked) return;
+        await printTeam(picked.registry);
     } catch (error) {
         console.error('Team failed:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
+}
+
+async function factsCommand(argv: string[]) {
+    try {
+        const picked = await resolveMemberRegistry(argv, 'uni facts <Registry>');
+        if (!picked) return;
+
+        const facts = await listFactsByChannels(picked.registry, [
+            'proposed',
+            'review',
+            'feedback',
+            'published',
+            'working'
+        ]);
+
+        console.log(`Facts (local) — registry context: ${picked.registry}`);
+        console.log(`  Person: ${picked.person}`);
+        console.log('');
+
+        if (facts.length === 0) {
+            console.log('  (none — uni add "…")');
+            return;
+        }
+
+        const awaiting = facts.filter((f) =>
+            ['proposed', 'review', 'feedback', 'working'].includes(f.registry_channel)
+        );
+        const published = facts.filter((f) => f.registry_channel === 'published');
+
+        if (awaiting.length > 0) {
+            console.log('Needs attention (proposed / review / feedback):');
+            for (const fact of awaiting) {
+                console.log(
+                    `  [${fact.registry_channel.padEnd(9)}] ${fact.namespace}/${fact.key}  ${truncateFactValue(fact.value)}`
+                );
+            }
+            console.log('');
+            console.log('  Publish:  uni publish <namespace/key>');
+            console.log('  Feedback: uni feedback <namespace/key>');
+            console.log('');
+        }
+
+        if (published.length > 0) {
+            console.log('Published:');
+            for (const fact of published) {
+                console.log(
+                    `  ${fact.namespace}/${fact.key}  ${truncateFactValue(fact.value)}`
+                );
+            }
+        }
+
+        if (awaiting.length === 0 && published.length === 0) {
+            for (const fact of facts) {
+                console.log(
+                    `  [${fact.registry_channel}] ${fact.namespace}/${fact.key}  ${truncateFactValue(fact.value)}`
+                );
+            }
+        }
+    } catch (error) {
+        console.error('Facts failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+function truncateFactValue(value: unknown, max = 72): string {
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    if (!text) return '';
+    const oneLine = text.replace(/\s+/g, ' ').trim();
+    return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
 async function printTeam(registryName: string) {
@@ -794,30 +954,6 @@ async function printTeam(registryName: string) {
             console.log(`  uni use ${team.owner}`);
             console.log(`  uni approve ${team.registry} ${p.person}`);
         }
-    }
-}
-
-async function requestsCommand(argv: string[]) {
-    try {
-        const registry = argv[0];
-        if (registry) {
-            // Prefer the richer team view when a registry is named.
-            await printTeam(registry);
-            return;
-        }
-        const requests = await listJoinRequests();
-        if (requests.length === 0) {
-            console.log('No join requests. Try: uni team <Registry>');
-            return;
-        }
-        for (const r of requests) {
-            console.log(`${r.status.padEnd(10)}  ${r.registry_name}  ${r.person}`);
-        }
-        console.log('');
-        console.log('Tip: uni team <Registry> shows owner + members + requests together.');
-    } catch (error) {
-        console.error('Error:', error instanceof Error ? error.message : String(error));
-        process.exit(1);
     }
 }
 

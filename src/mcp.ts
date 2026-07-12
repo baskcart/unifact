@@ -3,6 +3,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as z from 'zod/v4';
 import { db, AuditLogRow } from './db.js';
+import { getActiveLocalApiKey } from './keys.js';
+import { getPersonMembership, requireWorkingRegistry } from './registry.js';
 import {
     approveFact,
     deleteAgentProfile,
@@ -47,6 +49,31 @@ const server = new McpServer({
     name: 'unifact',
     version: '0.2.0'
 });
+
+const optionalRegistryField = {
+    registry: z.string().min(1).optional().describe('Org registry name; must match membership if provided')
+};
+
+async function resolveToolRegistry(requested?: string | null): Promise<string> {
+    const active = await getActiveLocalApiKey();
+    if (requested?.trim()) {
+        const name = requested.trim();
+        if (active?.person) {
+            const membership = await getPersonMembership(active.person, name);
+            if (!membership) {
+                throw new Error(`Not a member of registry '${name}'`);
+            }
+            return membership.registry.name;
+        }
+        const fallback = active?.registry_name?.trim() || (await requireWorkingRegistry(null));
+        if (name.toLowerCase() !== fallback.toLowerCase()) {
+            throw new Error(`registry '${name}' is not available`);
+        }
+        return fallback;
+    }
+    if (active?.registry_name?.trim()) return active.registry_name.trim();
+    return requireWorkingRegistry(active?.person ?? null);
+}
 
 const factMetadataSchema = {
     description: z.string().nullable().optional().describe('Optional fact description'),
@@ -120,19 +147,29 @@ function errorResult(message: string) {
 }
 
 server.registerTool('list_namespaces', {
-    description: 'List namespaces in the UniFact store with fact counts'
-}, async () => {
-    const rows = await db.all<{ namespace: string; count: number }>(`
-      SELECT namespace, COUNT(*) AS count
-      FROM facts
-      GROUP BY namespace
-      ORDER BY namespace
-    `);
+    description: 'List namespaces in the UniFact store with fact counts',
+    inputSchema: {
+        ...optionalRegistryField
+    }
+}, async ({ registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const rows = await db.all<{ namespace: string; count: number }>(`
+          SELECT namespace, COUNT(*) AS count
+          FROM facts
+          WHERE registry_name = ?
+          GROUP BY namespace
+          ORDER BY namespace
+        `, [registry]);
 
-    return toolResult({
-        namespaces: rows,
-        count: rows.length
-    });
+        return toolResult({
+            registry,
+            namespaces: rows,
+            count: rows.length
+        });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
 });
 
 server.registerTool('registry_metadata', {
@@ -144,43 +181,58 @@ server.registerTool('registry_metadata', {
 server.registerTool('list_facts', {
     description: 'List all facts in a namespace with full metadata',
     inputSchema: {
-        namespace: z.string().min(1).describe('Namespace to list, for example company.decisions')
+        namespace: z.string().min(1).describe('Namespace to list, for example company.decisions'),
+        ...optionalRegistryField
     }
-}, async ({ namespace }) => {
-    const facts = (await listFacts(namespace)).map(factFromRow);
-    return toolResult({
-        namespace,
-        facts,
-        count: facts.length
-    });
+}, async ({ namespace, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const facts = (await listFacts(registry, namespace)).map(factFromRow);
+        return toolResult({
+            registry,
+            namespace,
+            facts,
+            count: facts.length
+        });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
 });
 
 server.registerTool('get_fact', {
     description: 'Get one fact by namespace and key with full metadata',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
-        key: z.string().min(1).describe('Fact key')
+        key: z.string().min(1).describe('Fact key'),
+        ...optionalRegistryField
     }
-}, async ({ namespace, key }) => {
-    const row = await getFactRow(namespace, key);
+}, async ({ namespace, key, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const row = await getFactRow(registry, namespace, key);
 
-    if (!row) {
-        return errorResult(`Fact '${key}' not found in namespace '${namespace}'`);
+        if (!row) {
+            return errorResult(`Fact '${key}' not found in namespace '${namespace}'`);
+        }
+
+        return toolResult({
+            fact: factFromRow(row)
+        });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
     }
-
-    return toolResult({
-        fact: factFromRow(row)
-    });
 });
 
 server.registerTool('search_facts', {
     description: 'Search facts (SQLite FTS5 locally; PostgreSQL plainto_tsquery on staging)',
     inputSchema: {
-        query: z.string().min(1).describe('Full-text search query')
+        query: z.string().min(1).describe('Full-text search query'),
+        ...optionalRegistryField
     }
-}, async ({ query }) => {
+}, async ({ query, registry: registryArg }) => {
     try {
-        const facts = (await searchFacts(query)).map(factFromRow);
+        const registry = await resolveToolRegistry(registryArg);
+        const facts = (await searchFacts(registry, query)).map(factFromRow);
         return toolResult({
             query,
             facts,
@@ -207,11 +259,14 @@ server.registerTool('find_relevant_facts', {
         limit: z.number().int().min(1).max(500).optional().describe('Maximum facts to return'),
         query: z.string().optional().describe('Optional full-text query'),
         registry_channel: z.enum(FACT_REGISTRY_CHANNELS).optional().describe('Optional registry channel filter'),
-        published_only: z.boolean().optional().describe('Only return published facts')
+        published_only: z.boolean().optional().describe('Only return published facts'),
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        return toolResult(await findRelevantFacts(args));
+        const { registry: registryArg, ...query } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await findRelevantFacts({ ...query, registry_name: registry }));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -232,11 +287,14 @@ server.registerTool('pull_facts_for_agent', {
         include_inactive: z.boolean().optional().describe('Include inactive facts'),
         include_review: z.boolean().optional().describe('Include facts waiting for review'),
         limit: z.number().int().min(1).max(500).optional().describe('Maximum facts to return'),
-        query: z.string().optional().describe('Optional full-text query')
+        query: z.string().optional().describe('Optional full-text query'),
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        return toolResult(await pullFactsForAgent(args));
+        const { registry: registryArg, ...query } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await pullFactsForAgent({ ...query, registry_name: registry }));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -249,12 +307,14 @@ server.registerTool('upsert_fact', {
         value: z.any()
             .refine(value => value !== undefined, { message: 'Value is required' })
             .describe('Value to store. Strings are stored as-is; other JSON values are stringified.'),
-        ...factMetadataSchema
+        ...factMetadataSchema,
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        const { namespace, key, ...input } = args;
-        return toolResult(await upsertFact(namespace, key, input));
+        const { namespace, key, registry: registryArg, ...input } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await upsertFact(registry, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -269,12 +329,14 @@ server.registerTool('propose_fact', {
         value: z.any()
             .refine(value => value !== undefined, { message: 'Value is required' })
             .describe('Value to store. Strings are stored as-is; other JSON values are stringified.'),
-        ...factMetadataSchema
+        ...factMetadataSchema,
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        const { profile_id, namespace, key, ...input } = args;
-        return toolResult(await proposeFactFromProfile(profile_id, namespace, key, input));
+        const { profile_id, namespace, key, registry: registryArg, ...input } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await proposeFactFromProfile(registry, profile_id, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -285,20 +347,33 @@ server.registerTool('list_fact_versions', {
     description: 'List version and lifecycle events for one fact',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
-        key: z.string().min(1).describe('Fact key')
+        key: z.string().min(1).describe('Fact key'),
+        ...optionalRegistryField
     }
-}, async ({ namespace, key }) => {
-    return toolResult({ namespace, key, versions: await listFactVersions(namespace, key) });
+}, async ({ namespace, key, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult({ namespace, key, versions: await listFactVersions(registry, namespace, key) });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
 });
 
 server.registerTool('list_review_queue', {
     description: 'List proposed or reviewed facts waiting for curator approval',
     inputSchema: {
         namespace: z.string().optional().describe('Optional namespace filter'),
-        limit: z.number().int().min(1).max(500).optional().describe('Maximum facts to return')
+        limit: z.number().int().min(1).max(500).optional().describe('Maximum facts to return'),
+        ...optionalRegistryField
     }
 }, async (args) => {
-    return toolResult(await listReviewQueue(args));
+    try {
+        const { registry: registryArg, ...query } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await listReviewQueue({ ...query, registry_name: registry }));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
 });
 
 server.registerTool('approve_fact', {
@@ -307,12 +382,14 @@ server.registerTool('approve_fact', {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
         reviewed_by: z.string().optional().describe('Reviewer or curator id'),
-        change_reason: z.string().optional().describe('Approval reason')
+        change_reason: z.string().optional().describe('Approval reason'),
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        const { namespace, key, ...input } = args;
-        return toolResult(await approveFact(namespace, key, input));
+        const { namespace, key, registry: registryArg, ...input } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await approveFact(registry, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -324,12 +401,14 @@ server.registerTool('reject_fact', {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
         reviewed_by: z.string().optional().describe('Reviewer or curator id'),
-        change_reason: z.string().optional().describe('Rejection reason')
+        change_reason: z.string().optional().describe('Rejection reason'),
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        const { namespace, key, ...input } = args;
-        return toolResult(await rejectFact(namespace, key, input));
+        const { namespace, key, registry: registryArg, ...input } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await rejectFact(registry, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -342,12 +421,14 @@ server.registerTool('review_fact', {
         key: z.string().min(1).describe('Fact key'),
         approved: z.boolean().optional().describe('Whether review approved the fact'),
         reviewed_by: z.string().optional().describe('Reviewer id'),
-        change_reason: z.string().optional().describe('Review reason')
+        change_reason: z.string().optional().describe('Review reason'),
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        const { namespace, key, ...input } = args;
-        return toolResult(await reviewFact(namespace, key, input));
+        const { namespace, key, registry: registryArg, ...input } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await reviewFact(registry, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -359,12 +440,14 @@ server.registerTool('publish_fact', {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
         published_by: z.string().optional().describe('Publisher id'),
-        change_reason: z.string().optional().describe('Publish reason')
+        change_reason: z.string().optional().describe('Publish reason'),
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        const { namespace, key, ...input } = args;
-        return toolResult(await publishFact(namespace, key, input));
+        const { namespace, key, registry: registryArg, ...input } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await publishFact(registry, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -376,12 +459,14 @@ server.registerTool('feedback_fact', {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
         published_by: z.string().optional().describe('Owner / publisher id'),
-        change_reason: z.string().optional().describe('Why feedback is requested')
+        change_reason: z.string().optional().describe('Why feedback is requested'),
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        const { namespace, key, ...input } = args;
-        return toolResult(await feedbackFact(namespace, key, input));
+        const { namespace, key, registry: registryArg, ...input } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await feedbackFact(registry, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -393,12 +478,14 @@ server.registerTool('supersede_fact', {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
         superseded_by: z.string().min(1).describe('Replacement fact path'),
-        change_reason: z.string().optional().describe('Supersession reason')
+        change_reason: z.string().optional().describe('Supersession reason'),
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        const { namespace, key, ...input } = args;
-        return toolResult(await supersedeFact(namespace, key, input));
+        const { namespace, key, registry: registryArg, ...input } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await supersedeFact(registry, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -409,12 +496,14 @@ server.registerTool('retract_fact', {
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
-        change_reason: z.string().optional().describe('Retraction reason')
+        change_reason: z.string().optional().describe('Retraction reason'),
+        ...optionalRegistryField
     }
 }, async (args) => {
     try {
-        const { namespace, key, ...input } = args;
-        return toolResult(await retractFact(namespace, key, input));
+        const { namespace, key, registry: registryArg, ...input } = args;
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await retractFact(registry, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -423,43 +512,55 @@ server.registerTool('delete_fact', {
     description: 'Delete a fact',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
-        key: z.string().min(1).describe('Fact key')
+        key: z.string().min(1).describe('Fact key'),
+        ...optionalRegistryField
     }
-}, async ({ namespace, key }) => {
-    const deleted = await deleteFact(namespace, key);
-    if (!deleted) {
-        return errorResult(`Fact '${key}' not found in namespace '${namespace}'`);
-    }
+}, async ({ namespace, key, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const deleted = await deleteFact(registry, namespace, key);
+        if (!deleted) {
+            return errorResult(`Fact '${key}' not found in namespace '${namespace}'`);
+        }
 
-    return toolResult({
-        success: true,
-        action: 'DELETE',
-        namespace,
-        key
-    });
+        return toolResult({
+            success: true,
+            action: 'DELETE',
+            namespace,
+            key
+        });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
 });
 
 server.registerTool('audit_fact', {
     description: 'Get audit history for one fact, including metadata snapshots when available',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
-        key: z.string().min(1).describe('Fact key')
+        key: z.string().min(1).describe('Fact key'),
+        ...optionalRegistryField
     }
-}, async ({ namespace, key }) => {
-    const rows = await db.all<AuditLogRow>(`
-      SELECT id, action, namespace, key, old_value, new_value,
-             old_snapshot, new_snapshot, timestamp
-      FROM audit_log
-      WHERE namespace = ? AND key = ?
-      ORDER BY timestamp DESC
-    `, [namespace, key]);
+}, async ({ namespace, key, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const rows = await db.all<AuditLogRow>(`
+          SELECT id, action, registry_name, namespace, key, old_value, new_value,
+                 old_snapshot, new_snapshot, timestamp
+          FROM audit_log
+          WHERE registry_name = ? AND namespace = ? AND key = ?
+          ORDER BY timestamp DESC
+        `, [registry, namespace, key]);
 
-    return toolResult({
-        namespace,
-        key,
-        history: rows,
-        count: rows.length
-    });
+        return toolResult({
+            namespace,
+            key,
+            history: rows,
+            count: rows.length
+        });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
 });
 
 server.registerTool('list_agent_profiles', {

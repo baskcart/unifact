@@ -14,13 +14,26 @@ export interface SyncConfig {
 }
 
 async function getConfigFact(key: string): Promise<string | null> {
-    const row = await db.get<{ value: string }>(`
+    const active = await getActiveLocalApiKey();
+    const registryName = active?.registry_name?.trim() || null;
+
+    if (registryName) {
+        const scoped = await db.get<{ value: string }>(`
+          SELECT value
+          FROM facts
+          WHERE namespace = 'company.infrastructure' AND key = ? AND registry_name = ?
+        `, [key, registryName]);
+        if (scoped?.value != null) return scoped.value;
+    }
+
+    const fallback = await db.get<{ value: string }>(`
       SELECT value
       FROM facts
       WHERE namespace = 'company.infrastructure' AND key = ?
+      LIMIT 1
     `, [key]);
 
-    return row?.value ?? null;
+    return fallback?.value ?? null;
 }
 
 export async function getSyncConfig(): Promise<SyncConfig> {
@@ -111,10 +124,15 @@ export async function pushPersonKeyToRemote(input: {
 
         return { attempted: true, pushed: true };
     } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const hint =
+            /fetch failed|certificate|SSL|TLS|EPROTO/i.test(msg)
+                ? ' — https to staging fails with self-signed cert; use http://staging.unifact.ai in upstream-registry-url'
+                : '';
         return {
             attempted: true,
             pushed: false,
-            detail: error instanceof Error ? error.message : String(error)
+            detail: `${msg}${hint}`
         };
     }
 }

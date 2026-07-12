@@ -25,11 +25,21 @@ function proxy(clientReq, clientRes) {
   clientReq.pipe(upstream);
 }
 
-const tls = {
-  key: fs.readFileSync('/etc/ssl/private/ssl-cert-snakeoil.key'),
-  cert: fs.readFileSync('/etc/ssl/certs/ssl-cert-snakeoil.pem')
-};
+// Prefer Let's Encrypt; fall back to snakeoil only for broken local boots.
+const leDir = '/etc/letsencrypt/live/staging.unifact.ai';
+const tls = fs.existsSync(`${leDir}/privkey.pem`)
+  ? {
+      key: fs.readFileSync(`${leDir}/privkey.pem`),
+      cert: fs.readFileSync(`${leDir}/fullchain.pem`)
+    }
+  : {
+      key: fs.readFileSync('/etc/ssl/private/ssl-cert-snakeoil.key'),
+      cert: fs.readFileSync('/etc/ssl/certs/ssl-cert-snakeoil.pem')
+    };
 
 http.createServer(proxy).listen(80);
 https.createServer(tls, proxy).listen(443);
-console.log('proxy listening on 80/443 -> 127.0.0.1:4110');
+console.log(
+  'proxy listening on 80/443 -> 127.0.0.1:4110',
+  fs.existsSync(`${leDir}/privkey.pem`) ? '(Let\'s Encrypt)' : '(snakeoil fallback)'
+);

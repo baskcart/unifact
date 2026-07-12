@@ -2,7 +2,12 @@ import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import { db, AuditLogRow } from './db.js';
 import { formatFacts, FormatType, FactData } from './format.js';
-import { requireAuth, hasAccess } from './auth.js';
+import { requireAuth, requireAuthOrBootstrap, hasAccess } from './auth.js';
+import {
+    createApiKey,
+    listApiKeys,
+    setApiKeyEnabled
+} from './keys.js';
 import {
     approveFact,
     deleteAgentProfile,
@@ -40,8 +45,65 @@ app.get('/healthz', (_req: Request, res: Response) => {
     return res.json({
         ok: true,
         service: 'unifact',
+        backend: db.backend,
         database: db.name
     });
+});
+
+app.get('/v1/keys', requireAuthOrBootstrap('read'), async (_req: Request, res: Response) => {
+    try {
+        const keys = await listApiKeys();
+        return res.json({
+            keys: keys.map(k => ({
+                person: k.person,
+                api_key: k.api_key,
+                enabled: k.enabled,
+                namespaces: k.namespaces,
+                scopes: k.scopes,
+                updated_at: k.updated_at
+            })),
+            count: keys.length
+        });
+    } catch (err) {
+        return handleError(res, err, 'Failed to list API keys');
+    }
+});
+
+app.post('/v1/keys', requireAuthOrBootstrap('write'), async (req: Request, res: Response) => {
+    try {
+        const body = bodyAsRecord(req);
+        const person = typeof body.person === 'string' ? body.person : '';
+        const namespaces = Array.isArray(body.namespaces)
+            ? body.namespaces.map(String)
+            : undefined;
+        const scopes = Array.isArray(body.scopes)
+            ? body.scopes.map(String).filter((s): s is 'read' | 'write' => s === 'read' || s === 'write')
+            : undefined;
+        const apiKey = typeof body.api_key === 'string' ? body.api_key : undefined;
+        const key = await createApiKey({ person, namespaces, scopes, api_key: apiKey });
+        console.log(`[unifact] API key upserted for person=${key.person} enabled=${key.enabled}`);
+        return res.json({ success: true, key });
+    } catch (err) {
+        return handleError(res, err, 'Failed to create API key');
+    }
+});
+
+app.post('/v1/keys/:person/on', requireAuth('write'), async (req: Request, res: Response) => {
+    try {
+        const key = await setApiKeyEnabled(req.params.person, true);
+        return res.json({ success: true, key });
+    } catch (err) {
+        return handleError(res, err, 'Failed to enable API key');
+    }
+});
+
+app.post('/v1/keys/:person/off', requireAuth('write'), async (req: Request, res: Response) => {
+    try {
+        const key = await setApiKeyEnabled(req.params.person, false);
+        return res.json({ success: true, key });
+    } catch (err) {
+        return handleError(res, err, 'Failed to disable API key');
+    }
 });
 
 function getFormat(req: Request): FormatType {
@@ -134,42 +196,58 @@ function handleError(res: Response, err: unknown, fallback: string) {
     return res.status(400).json({ error: message });
 }
 
-app.get('/v1/agent-profiles', requireAuth('read'), (_req: Request, res: Response) => {
+async function filterAuthorized<T>(
+    items: T[],
+    apiKey: string | undefined,
+    namespaceOf: (item: T) => string,
+    scope: 'read' | 'write' = 'read'
+): Promise<T[]> {
+    const out: T[] = [];
+    for (const item of items) {
+        if (await hasAccess(apiKey, namespaceOf(item), scope)) {
+            out.push(item);
+        }
+    }
+    return out;
+}
+
+app.get('/v1/agent-profiles', requireAuth('read'), async (_req: Request, res: Response) => {
     try {
-        const profiles = listAgentProfiles();
+        const profiles = await listAgentProfiles();
         return res.json({ profiles, count: profiles.length });
     } catch (err) {
         return handleError(res, err, 'Failed to list agent profiles');
     }
 });
 
-app.get('/v1/registry/metadata', requireAuth('read'), (_req: Request, res: Response) => {
+app.get('/v1/registry/metadata', requireAuth('read'), async (_req: Request, res: Response) => {
     try {
-        return res.json(getRegistryMetadata());
+        return res.json(await getRegistryMetadata());
     } catch (err) {
         return handleError(res, err, 'Failed to load registry metadata');
     }
 });
 
-app.get('/v1/agent-profiles/:id', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/agent-profiles/:id', requireAuth('read'), async (req: Request, res: Response) => {
     try {
-        const row = getAgentProfileRow(req.params.id);
+        const row = await getAgentProfileRow(req.params.id);
         if (!row) {
             return res.status(404).json({ error: `Agent profile '${req.params.id}' not found` });
         }
 
-        const profile = listAgentProfiles().find(item => item.id === req.params.id);
+        const profiles = await listAgentProfiles();
+        const profile = profiles.find(item => item.id === req.params.id);
         return res.json({ profile });
     } catch (err) {
         return handleError(res, err, 'Failed to load agent profile');
     }
 });
 
-app.get('/v1/agent-profiles/:id/relevant-facts', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/agent-profiles/:id/relevant-facts', requireAuth('read'), async (req: Request, res: Response) => {
     const apiKey = getApiKey(req);
 
     try {
-        const relevance = findRelevantFacts({
+        const relevance = await findRelevantFacts({
             profile_id: req.params.id,
             namespace: getQueryString(req, 'namespace'),
             subject: getQueryString(req, 'subject'),
@@ -186,7 +264,11 @@ app.get('/v1/agent-profiles/:id/relevant-facts', requireAuth('read'), (req: Requ
             published_only: getQueryBoolean(req, 'published_only')
         });
 
-        const results = relevance.results.filter(result => hasAccess(apiKey, result.fact.namespace, 'read'));
+        const results = await filterAuthorized(
+            relevance.results,
+            apiKey,
+            result => result.fact.namespace
+        );
         return res.json({
             profile: relevance.profile,
             results,
@@ -198,11 +280,11 @@ app.get('/v1/agent-profiles/:id/relevant-facts', requireAuth('read'), (req: Requ
 });
 
 
-app.get('/v1/agent-profiles/:id/pull', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/agent-profiles/:id/pull', requireAuth('read'), async (req: Request, res: Response) => {
     const apiKey = getApiKey(req);
 
     try {
-        const relevance = pullFactsForAgent({
+        const relevance = await pullFactsForAgent({
             profile_id: req.params.id,
             namespace: getQueryString(req, 'namespace'),
             subject: getQueryString(req, 'subject'),
@@ -217,7 +299,11 @@ app.get('/v1/agent-profiles/:id/pull', requireAuth('read'), (req: Request, res: 
             query: getQueryString(req, 'q')
         });
 
-        const results = relevance.results.filter(result => hasAccess(apiKey, result.fact.namespace, 'read'));
+        const results = await filterAuthorized(
+            relevance.results,
+            apiKey,
+            result => result.fact.namespace
+        );
         return res.json({
             profile: relevance.profile,
             results,
@@ -227,9 +313,9 @@ app.get('/v1/agent-profiles/:id/pull', requireAuth('read'), (req: Request, res: 
         return handleError(res, err, 'Failed to pull facts for agent profile');
     }
 });
-const createOrUpdateAgentProfile = (req: Request, res: Response) => {
+const createOrUpdateAgentProfile = async (req: Request, res: Response) => {
     try {
-        const result = upsertAgentProfile(req.params.id, bodyAsRecord(req));
+        const result = await upsertAgentProfile(req.params.id, bodyAsRecord(req));
         console.log(`[unifact] ${result.action}: agent profile ${req.params.id}`);
         return res.json(result);
     } catch (err) {
@@ -240,9 +326,9 @@ const createOrUpdateAgentProfile = (req: Request, res: Response) => {
 app.post('/v1/agent-profiles/:id', requireAuth('write'), createOrUpdateAgentProfile);
 app.put('/v1/agent-profiles/:id', requireAuth('write'), createOrUpdateAgentProfile);
 
-app.post('/v1/agent-profiles/:id/facts/:namespace/:key', requireAuth('write'), (req: Request, res: Response) => {
+app.post('/v1/agent-profiles/:id/facts/:namespace/:key', requireAuth('write'), async (req: Request, res: Response) => {
     try {
-        const result = proposeFactFromProfile(req.params.id, req.params.namespace, req.params.key, bodyAsRecord(req));
+        const result = await proposeFactFromProfile(req.params.id, req.params.namespace, req.params.key, bodyAsRecord(req));
         console.log(`[unifact] ${result.action}: ${req.params.namespace}/${req.params.key} from profile ${req.params.id}`);
         return res.json(result);
     } catch (err) {
@@ -250,9 +336,9 @@ app.post('/v1/agent-profiles/:id/facts/:namespace/:key', requireAuth('write'), (
     }
 });
 
-app.delete('/v1/agent-profiles/:id', requireAuth('write'), (req: Request, res: Response) => {
+app.delete('/v1/agent-profiles/:id', requireAuth('write'), async (req: Request, res: Response) => {
     try {
-        const deleted = deleteAgentProfile(req.params.id);
+        const deleted = await deleteAgentProfile(req.params.id);
         if (!deleted) {
             return res.status(404).json({ error: `Agent profile '${req.params.id}' not found` });
         }
@@ -264,7 +350,7 @@ app.delete('/v1/agent-profiles/:id', requireAuth('write'), (req: Request, res: R
     }
 });
 
-app.get('/v1/facts/_search', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/facts/_search', requireAuth('read'), async (req: Request, res: Response) => {
     const query = req.query.q as string | undefined;
     const format = getFormat(req);
     const apiKey = getApiKey(req);
@@ -274,8 +360,8 @@ app.get('/v1/facts/_search', requireAuth('read'), (req: Request, res: Response) 
     }
 
     try {
-        const matches = searchFacts(query);
-        const authorizedMatches = matches.filter(match => hasAccess(apiKey, match.namespace, 'read'));
+        const matches = await searchFacts(query);
+        const authorizedMatches = await filterAuthorized(matches, apiKey, match => match.namespace);
         const facts = authorizedMatches.map(factFromRow);
 
         if (format === 'json') {
@@ -292,11 +378,11 @@ app.get('/v1/facts/_search', requireAuth('read'), (req: Request, res: Response) 
     }
 });
 
-app.get('/v1/facts/_relevant', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/facts/_relevant', requireAuth('read'), async (req: Request, res: Response) => {
     const apiKey = getApiKey(req);
 
     try {
-        const relevance = findRelevantFacts({
+        const relevance = await findRelevantFacts({
             profile_id: getQueryString(req, 'profile_id'),
             namespace: getQueryString(req, 'namespace'),
             subject: getQueryString(req, 'subject'),
@@ -313,7 +399,11 @@ app.get('/v1/facts/_relevant', requireAuth('read'), (req: Request, res: Response
             published_only: getQueryBoolean(req, 'published_only')
         });
 
-        const results = relevance.results.filter(result => hasAccess(apiKey, result.fact.namespace, 'read'));
+        const results = await filterAuthorized(
+            relevance.results,
+            apiKey,
+            result => result.fact.namespace
+        );
         return res.json({
             profile: relevance.profile,
             results,
@@ -324,15 +414,15 @@ app.get('/v1/facts/_relevant', requireAuth('read'), (req: Request, res: Response
     }
 });
 
-app.get('/v1/facts/_review-queue', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/facts/_review-queue', requireAuth('read'), async (req: Request, res: Response) => {
     const apiKey = getApiKey(req);
 
     try {
-        const queue = listReviewQueue({
+        const queue = await listReviewQueue({
             namespace: getQueryString(req, 'namespace'),
             limit: getQueryNumber(req, 'limit')
         });
-        const facts = queue.facts.filter(fact => hasAccess(apiKey, fact.namespace, 'read'));
+        const facts = await filterAuthorized(queue.facts, apiKey, fact => fact.namespace);
         return res.json({
             facts,
             count: facts.length
@@ -343,87 +433,87 @@ app.get('/v1/facts/_review-queue', requireAuth('read'), (req: Request, res: Resp
 });
 
 
-app.get('/v1/facts/:namespace/:key/versions', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/facts/:namespace/:key/versions', requireAuth('read'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        const versions = listFactVersions(namespace, key);
+        const versions = await listFactVersions(namespace, key);
         return res.json({ namespace, key, versions, count: versions.length });
     } catch (err) {
         return handleError(res, err, 'Failed to load fact versions');
     }
 });
 
-app.post('/v1/facts/:namespace/:key/review', requireAuth('write'), (req: Request, res: Response) => {
+app.post('/v1/facts/:namespace/:key/review', requireAuth('write'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        return res.json(reviewFact(namespace, key, bodyAsRecord(req)));
+        return res.json(await reviewFact(namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to review fact');
     }
 });
 
-app.post('/v1/facts/:namespace/:key/approve', requireAuth('write'), (req: Request, res: Response) => {
+app.post('/v1/facts/:namespace/:key/approve', requireAuth('write'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        return res.json(approveFact(namespace, key, bodyAsRecord(req)));
+        return res.json(await approveFact(namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to approve fact');
     }
 });
 
-app.post('/v1/facts/:namespace/:key/reject', requireAuth('write'), (req: Request, res: Response) => {
+app.post('/v1/facts/:namespace/:key/reject', requireAuth('write'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        return res.json(rejectFact(namespace, key, bodyAsRecord(req)));
+        return res.json(await rejectFact(namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to reject fact');
     }
 });
 
-app.post('/v1/facts/:namespace/:key/publish', requireAuth('write'), (req: Request, res: Response) => {
+app.post('/v1/facts/:namespace/:key/publish', requireAuth('write'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        return res.json(publishFact(namespace, key, bodyAsRecord(req)));
+        return res.json(await publishFact(namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to publish fact');
     }
 });
 
-app.post('/v1/facts/:namespace/:key/supersede', requireAuth('write'), (req: Request, res: Response) => {
+app.post('/v1/facts/:namespace/:key/supersede', requireAuth('write'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        return res.json(supersedeFact(namespace, key, bodyAsRecord(req)));
+        return res.json(await supersedeFact(namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to supersede fact');
     }
 });
 
-app.post('/v1/facts/:namespace/:key/retract', requireAuth('write'), (req: Request, res: Response) => {
+app.post('/v1/facts/:namespace/:key/retract', requireAuth('write'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        return res.json(retractFact(namespace, key, bodyAsRecord(req)));
+        return res.json(await retractFact(namespace, key, bodyAsRecord(req)));
     } catch (err) {
         return handleError(res, err, 'Failed to retract fact');
     }
 });
-app.get('/v1/facts/:namespace/:key/audit', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/facts/:namespace/:key/audit', requireAuth('read'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        const logs = db.prepare(`
+        const logs = await db.all<AuditLogRow>(`
           SELECT id, action, namespace, key, old_value, new_value,
                  old_snapshot, new_snapshot, timestamp
           FROM audit_log
           WHERE namespace = ? AND key = ?
           ORDER BY timestamp DESC
-        `).all(namespace, key) as AuditLogRow[];
+        `, [namespace, key]);
 
         return res.json({
             namespace,
@@ -437,12 +527,12 @@ app.get('/v1/facts/:namespace/:key/audit', requireAuth('read'), (req: Request, r
     }
 });
 
-app.get('/v1/facts/:namespace/:key', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/facts/:namespace/:key', requireAuth('read'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
     const format = getFormat(req);
 
     try {
-        const row = getFactRow(namespace, key);
+        const row = await getFactRow(namespace, key);
         if (!row) {
             return res.status(404).json({ error: `Fact '${key}' not found in namespace '${namespace}'` });
         }
@@ -459,15 +549,15 @@ app.get('/v1/facts/:namespace/:key', requireAuth('read'), (req: Request, res: Re
     }
 });
 
-app.get('/v1/facts/:namespace', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/facts/:namespace', requireAuth('read'), async (req: Request, res: Response) => {
     const { namespace } = req.params;
     const format = getFormat(req);
 
     try {
         const registryChannel = getQueryString(req, 'registry_channel');
         const rows = registryChannel
-            ? listFacts(namespace).filter(row => row.registry_channel === registryChannel)
-            : listFacts(namespace);
+            ? (await listFacts(namespace)).filter(row => row.registry_channel === registryChannel)
+            : await listFacts(namespace);
         const facts = rows.map(factFromRow);
 
         if (format === 'json' && wantsMetadata(req)) {
@@ -481,7 +571,7 @@ app.get('/v1/facts/:namespace', requireAuth('read'), (req: Request, res: Respons
     }
 });
 
-app.post('/v1/facts/_batch', (req: Request, res: Response) => {
+app.post('/v1/facts/_batch', async (req: Request, res: Response) => {
     const { namespaces } = req.body;
     const format = getFormat(req);
     const apiKey = getApiKey(req);
@@ -491,13 +581,15 @@ app.post('/v1/facts/_batch', (req: Request, res: Response) => {
     }
 
     for (const namespace of namespaces) {
-        if (!hasAccess(apiKey, namespace, 'read')) {
+        if (!(await hasAccess(apiKey, namespace, 'read'))) {
             return res.status(403).json({ error: `Forbidden: API key does not have read access to namespace '${namespace}'` });
         }
     }
 
     try {
-        const facts = namespaces.flatMap(namespace => listFacts(String(namespace)).map(factFromRow));
+        const facts = (await Promise.all(
+            namespaces.map(async namespace => (await listFacts(String(namespace))).map(factFromRow))
+        )).flat();
 
         if (format === 'json' && wantsMetadata(req)) {
             return res.json({ facts, count: facts.length });
@@ -510,11 +602,11 @@ app.post('/v1/facts/_batch', (req: Request, res: Response) => {
     }
 });
 
-const createOrUpdateFact = (req: Request, res: Response) => {
+const createOrUpdateFact = async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        const result = upsertFact(namespace, key, bodyAsRecord(req));
+        const result = await upsertFact(namespace, key, bodyAsRecord(req));
         console.log(`[unifact] ${result.action}: ${namespace}/${key}`);
         return res.json(result);
     } catch (err) {
@@ -525,11 +617,11 @@ const createOrUpdateFact = (req: Request, res: Response) => {
 app.post('/v1/facts/:namespace/:key', requireAuth('write'), createOrUpdateFact);
 app.put('/v1/facts/:namespace/:key', requireAuth('write'), createOrUpdateFact);
 
-app.delete('/v1/facts/:namespace/:key', requireAuth('write'), (req: Request, res: Response) => {
+app.delete('/v1/facts/:namespace/:key', requireAuth('write'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
     try {
-        const deleted = deleteFact(namespace, key);
+        const deleted = await deleteFact(namespace, key);
         if (!deleted) {
             return res.status(404).json({ error: `Fact '${key}' not found in namespace '${namespace}'` });
         }
@@ -543,9 +635,9 @@ app.delete('/v1/facts/:namespace/:key', requireAuth('write'), (req: Request, res
 });
 
 // Backward-compatible upstream staging endpoints.
-app.get('/v1/sync/status', requireAuth('read'), (req: Request, res: Response) => {
+app.get('/v1/sync/status', requireAuth('read'), async (req: Request, res: Response) => {
     try {
-        const status = getSyncStatus();
+        const status = await getSyncStatus();
         return res.json(status);
     } catch (err) {
         console.error(err);
@@ -582,5 +674,5 @@ app.post('/v1/sync/push', requireAuth('write'), async (req: Request, res: Respon
 app.listen(PORT, () => {
     console.log(`UniFact fact store server active at http://localhost:${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`Database file: ${db.name}`);
+    console.log(`Database backend: ${db.backend} (${db.name})`);
 });

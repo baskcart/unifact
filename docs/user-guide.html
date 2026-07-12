@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UniFact User Guide</title>
+  <style>
+    :root {
+      --ink: #1a1f1c;
+      --muted: #5a635c;
+      --paper: #f7f4ef;
+      --card: #ffffff;
+      --accent: #0f6b4c;
+      --line: #ddd6c8;
+      --warn: #8a5a00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #e8f2ec 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #f3ebe0 0%, transparent 50%),
+        var(--paper);
+      line-height: 1.55;
+    }
+    header {
+      padding: 3rem 1.25rem 2rem;
+      max-width: 820px;
+      margin: 0 auto;
+    }
+    header p.tagline {
+      font-size: 1.25rem;
+      color: var(--accent);
+      font-weight: 650;
+      margin: 0 0 0.5rem;
+      letter-spacing: 0.02em;
+    }
+    h1 {
+      font-size: clamp(2rem, 4vw, 2.75rem);
+      line-height: 1.15;
+      margin: 0 0 0.75rem;
+      font-weight: 750;
+    }
+    .lede {
+      font-size: 1.1rem;
+      color: var(--muted);
+      max-width: 40rem;
+      margin: 0;
+    }
+    main {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 0 1.25rem 4rem;
+      display: grid;
+      gap: 1.25rem;
+    }
+    section {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 1.35rem 1.4rem 1.5rem;
+      box-shadow: 0 1px 0 rgba(0,0,0,0.03);
+    }
+    h2 {
+      margin: 0 0 0.65rem;
+      font-size: 1.25rem;
+    }
+    h3 {
+      margin: 1.1rem 0 0.4rem;
+      font-size: 1.05rem;
+    }
+    p, li { color: var(--ink); }
+    .muted { color: var(--muted); }
+    ol, ul { padding-left: 1.2rem; margin: 0.4rem 0 0; }
+    li { margin: 0.35rem 0; }
+    .steps li { margin: 0.55rem 0; }
+    .callout {
+      background: #f3faf6;
+      border-left: 4px solid var(--accent);
+      padding: 0.85rem 1rem;
+      border-radius: 0 10px 10px 0;
+      margin-top: 0.9rem;
+    }
+    .note {
+      background: #fff8e8;
+      border-left: 4px solid var(--warn);
+      padding: 0.85rem 1rem;
+      border-radius: 0 10px 10px 0;
+      margin-top: 0.9rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 0.6rem;
+      font-size: 0.98rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.55rem 0.45rem;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    code, kbd {
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.92em;
+      background: #f0ece4;
+      padding: 0.1em 0.35em;
+      border-radius: 5px;
+    }
+    pre {
+      background: #1e2421;
+      color: #e8efe9;
+      padding: 0.9rem 1rem;
+      border-radius: 10px;
+      overflow-x: auto;
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+    footer {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 0 1.25rem 3rem;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    a { color: var(--accent); }
+    .who { display: grid; gap: 0.75rem; }
+    @media (min-width: 640px) {
+      .who { grid-template-columns: 1fr 1fr; }
+    }
+    .who div {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      background: #fcfbf8;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <p class="tagline">One Fact. One Truth.</p>
+    <h1>UniFact User Guide</h1>
+    <p class="lede">
+      UniFact is where your organization keeps <strong>trusted facts</strong> —
+      policies, decisions, and knowledge that people and AI can rely on.
+      This guide is for everyone: founders, operators, reviewers, and teammates —
+      not only developers.
+    </p>
+  </header>
+
+  <main>
+    <section>
+      <h2>What UniFact is (in plain language)</h2>
+      <p>
+        Think of Git as the place teams keep <em>code</em>.
+        UniFact is the place teams keep <em>facts</em> — short, clear statements of truth
+        with history, ownership, and approval.
+      </p>
+      <ul>
+        <li>“Our return window is 30 days.”</li>
+        <li>“Employees receive 20 days of PTO.”</li>
+        <li>“Staging registry lives at staging.unifact.ai.”</li>
+      </ul>
+      <div class="callout">
+        <strong>Documents</strong> are where facts are written.
+        <strong>UniFact</strong> is where facts are managed, reviewed, and shared.
+      </div>
+    </section>
+
+    <section>
+      <h2>How organizations work</h2>
+      <p>
+        UniFact is <strong>tenanted by organization</strong>.
+        A registry has a name — for example <strong>Unifact</strong>.
+      </p>
+      <ol class="steps">
+        <li><strong>First person creates the registry</strong> for the org and becomes the owner.</li>
+        <li><strong>Others join</strong> that registry (they do not create a second “Unifact”).</li>
+        <li>Each person gets <strong>one API key</strong> that can be turned <strong>on</strong> or <strong>off</strong>.</li>
+        <li>People and AI assistants use that key to read published facts and propose new ones.</li>
+      </ol>
+      <div class="note">
+        Creating a registry is about the <strong>organization name</strong>, not about cloning a Git repository.
+        You may optionally paste a GitHub/GitLab URL only to <em>suggest</em> the org name and description
+        (UniFact reads public metadata from the URL — it does not run Git).
+      </div>
+    </section>
+
+    <section>
+      <h2>Who this is for</h2>
+      <div class="who">
+        <div>
+          <h3>Owners &amp; admins</h3>
+          <p class="muted">Create the org registry, approve who joins, turn keys on/off.</p>
+        </div>
+        <div>
+          <h3>Teammates</h3>
+          <p class="muted">Join the org, pull trusted facts, propose updates for review.</p>
+        </div>
+        <div>
+          <h3>Reviewers / curators</h3>
+          <p class="muted">Approve or reject proposed facts before they become published truth.</p>
+        </div>
+        <div>
+          <h3>AI assistants</h3>
+          <p class="muted">Read published facts and propose new ones — same rules as people.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>The life of a fact</h2>
+      <table>
+        <thead>
+          <tr><th>Stage</th><th>Meaning</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>Working</strong></td><td>Draft on your side — not ready for the group yet.</td></tr>
+          <tr><td><strong>Proposed</strong></td><td>Submitted for review on the shared registry.</td></tr>
+          <tr><td><strong>Review</strong></td><td>A curator is evaluating it.</td></tr>
+          <tr><td><strong>Published</strong></td><td>Approved truth — safe for people and AI to use.</td></tr>
+        </tbody>
+      </table>
+      <p class="muted" style="margin-top:0.75rem">
+        Facts can later be superseded or retracted when the world changes.
+      </p>
+    </section>
+
+    <section>
+      <h2>Everyday actions</h2>
+      <h3>Check your connection</h3>
+      <pre>uni status</pre>
+      <p class="muted">Shows whether you are linked to the shared registry and which person key is active.</p>
+
+      <h3>Get the latest published facts</h3>
+      <pre>uni pull</pre>
+      <p class="muted">Like refreshing from the source of truth. Only <strong>published</strong> facts come down.</p>
+
+      <h3>Send your proposals</h3>
+      <pre>uni push</pre>
+      <p class="muted">Uploads your draft/proposed facts for review — not an automatic publish.</p>
+
+      <h3>Your personal key</h3>
+      <pre>uni key create --person yourname
+uni key list
+uni key on  --person yourname
+uni key off --person yourname</pre>
+      <p class="muted">
+        Keys are stored in UniFact (not in a password file on your desktop).
+        <strong>Off</strong> means that person cannot use the registry until turned on again.
+      </p>
+    </section>
+
+    <section>
+      <h2>Inviting someone else</h2>
+      <ol class="steps">
+        <li>They should <strong>join your org registry</strong> — not create a new registry with the same name.</li>
+        <li>After approval, they receive (or create with approval) a <strong>person key</strong>.</li>
+        <li>They run <code>uni pull</code> / <code>uni push</code> with their key enabled.</li>
+        <li>If they leave or you need to pause access, turn their key <strong>off</strong>.</li>
+      </ol>
+      <div class="callout">
+        Shared host (for example staging.unifact.ai) can host many org registries.
+        Access is per organization and per person — not “everyone on the server sees everything.”
+      </div>
+    </section>
+
+    <section>
+      <h2>Optional: suggest org details from a Git URL</h2>
+      <p>
+        If your company already has a public GitHub or GitLab project, you can paste the URL
+        to fill in suggested names — without installing Git and without reading UniFact facts.
+      </p>
+      <pre>uni meta https://github.com/your-org/your-repo</pre>
+      <p class="muted">
+        UniFact reads public hosting metadata (org, repo name, description).
+        That does <strong>not</strong> replace creating or joining a UniFact registry.
+      </p>
+    </section>
+
+    <section>
+      <h2>What UniFact is not</h2>
+      <ul>
+        <li>Not a replacement for your code repository</li>
+        <li>Not a chat history or “agent memory dump”</li>
+        <li>Not an unreviewed wiki — publication is intentional</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Getting help</h2>
+      <ul>
+        <li>Product site: <a href="https://unifact.ai">unifact.ai</a></li>
+        <li>Open-source project: <a href="https://github.com/baskcart/unifact">github.com/baskcart/unifact</a></li>
+        <li>Technical README in the repository (for install and hosting details)</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    UniFact — source control for organizational facts. Guide written for all users.
+  </footer>
+</body>
+</html>

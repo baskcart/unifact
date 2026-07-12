@@ -33,16 +33,16 @@ const SEED_FACTS: SeedFact[] = [
     {
         namespace: 'company.decisions',
         key: 'unifact-backend',
-        value: 'SQLite + FTS5 is the local and development backend; hosted SMB deployments may use DynamoDB behind the same Unifact API.',
-        description: 'Storage choice is deployment topology, not product identity: agents use the Unifact API/model while local/dev can use SQLite and hosted SMB can use DynamoDB.',
+        value: 'SQLite + FTS5 is the local working-store backend; origin/remote/host registry uses PostgreSQL on AWS.',
+        description: 'Storage choice is deployment topology, not product identity: local agents use SQLite; the shared origin registry uses Postgres. DynamoDB is no longer the planned hosted registry backend.',
         fact_type: 'decision_fact',
         subject: 'unifact',
         scope: 'platform',
         derivation: 'asserted',
         actionability: 'decision_record',
-        audience: ['general-agent', 'coding-agent'],
-        relevance_tags: ['architecture', 'local-first', 'storage-adapter'],
-        priority: 'normal',
+        audience: ['general-agent', 'coding-agent', 'builder-agent', 'operations-agent'],
+        relevance_tags: ['architecture', 'local-first', 'storage-adapter', 'postgres', 'sqlite'],
+        priority: 'critical',
         approval_status: 'approved',
         created_by: 'seed'
     },
@@ -65,8 +65,8 @@ const SEED_FACTS: SeedFact[] = [
     {
         namespace: 'company.branding',
         key: 'tagline',
-        value: 'Unique facts, Unified acts',
-        description: 'Official tagline for Unifact, emphasizing the power of unified fact management driving coordinated action.',
+        value: 'One Fact. One Truth.',
+        description: 'Official tagline for UniFact: every organization should have one authoritative fact about every piece of knowledge.',
         fact_type: 'decision_fact',
         subject: 'unifact',
         scope: 'brand',
@@ -113,15 +113,47 @@ const SEED_FACTS: SeedFact[] = [
     {
         namespace: 'company.decisions',
         key: 'unifact-storage-topology',
-        value: 'Unifact is the fact API, model, and registry lifecycle; SQLite and DynamoDB are storage adapters for different deployment modes.',
-        description: 'Use SQLite for local/dev working stores and DynamoDB for hosted SMB central registry deployments while preserving one Unifact API/MCP contract for agents.',
+        value: 'Unifact is the fact API, model, and registry lifecycle; SQLite is the local adapter and PostgreSQL is the origin/remote/host adapter.',
+        description: 'Use SQLite for local working stores and PostgreSQL on AWS for the shared origin registry while preserving one Unifact API/MCP contract for agents.',
         fact_type: 'decision_fact',
         subject: 'unifact',
         scope: 'architecture',
         derivation: 'asserted',
         actionability: 'decision_record',
         audience: ['general-agent', 'builder-agent', 'coding-agent', 'operations-agent'],
-        relevance_tags: ['architecture', 'storage-adapter', 'registry'],
+        relevance_tags: ['architecture', 'storage-adapter', 'registry', 'postgres', 'sqlite'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.decisions',
+        key: 'unifact-origin-storage',
+        value: 'Origin/remote/host UniFact registry stores facts in PostgreSQL on AWS.',
+        description: 'Local instances keep SQLite working stores and sync to a Postgres-backed origin. Do not put database passwords in facts; connection secrets stay in env/secret config.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'architecture',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'coding-agent', 'operations-agent'],
+        relevance_tags: ['architecture', 'origin', 'postgres', 'aws', 'registry'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.decisions',
+        key: 'unifact-hosting',
+        value: 'Hosted UniFact origin uses PostgreSQL on AWS (RDS or equivalent managed Postgres); local stays SQLite.',
+        description: 'Prefer managed AWS Postgres for the shared registry. Fargate/Lightsail for the UniFact API process is a separate compute choice from the Postgres origin store.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'infrastructure',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'coding-agent', 'operations-agent'],
+        relevance_tags: ['infrastructure', 'hosting', 'postgres', 'aws'],
         priority: 'critical',
         approval_status: 'approved',
         created_by: 'seed'
@@ -403,12 +435,12 @@ const SEED_AGENT_PROFILES: SeedAgentProfile[] = [
     }
 ];
 
-function runSeed() {
+async function runSeed() {
     console.log('Seeding UniFact baseline facts and agent profiles...');
 
     for (const item of SEED_FACTS) {
         const { namespace, key, ...input } = item;
-        const result = upsertFact(namespace, key, {
+        const result = await upsertFact(namespace, key, {
             ...input,
             registry_channel: 'published',
             published_by: 'seed',
@@ -420,16 +452,14 @@ function runSeed() {
 
     for (const profile of SEED_AGENT_PROFILES) {
         const { id, ...input } = profile;
-        const result = upsertAgentProfile(id, input);
+        const result = await upsertAgentProfile(id, input);
         console.log(`${result.action}: agent profile ${id}`);
     }
 
     console.log('Seeding complete.');
 }
 
-try {
-    runSeed();
-} catch (err) {
+runSeed().catch(err => {
     console.error('Failed to run seed script:', err);
     process.exitCode = 1;
-}
+});

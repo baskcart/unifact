@@ -7,10 +7,11 @@ UniFact can run as a small containerized service behind an internal or public Ap
 - Container: this repository's `Dockerfile`
 - Port: `4110`
 - Health check: `GET /healthz`
-- Persistent database path: `DATABASE_PATH=/data/store.db`
-- Recommended persistence: mount an encrypted EFS volume at `/data`
+- Persistent database path: `DATABASE_PATH=/data/store.db` (SQLite local/default)
+- Or set `DATABASE_URL` for PostgreSQL (staging/origin on Lightsail RDS); when set, SQLite is not used
+- Recommended persistence for SQLite: mount an encrypted EFS volume at `/data`
 
-SQLite on Fargate needs persistent storage. Without EFS, the database lives on task storage and can be lost when the task is replaced.
+SQLite on Fargate needs persistent storage. Without EFS, the database lives on task storage and can be lost when the task is replaced. Prefer `DATABASE_URL` (Postgres) for shared staging/origin registries.
 
 ## Required Environment Variables
 
@@ -18,6 +19,8 @@ SQLite on Fargate needs persistent storage. Without EFS, the database lives on t
 PORT=4110
 NODE_ENV=production
 DATABASE_PATH=/data/store.db
+# Or for Postgres origin/staging:
+# DATABASE_URL=postgresql://dbmasteruser:ENCODED_PASSWORD@HOST:5432/unifact?sslmode=require
 UNIFACT_MASTER_KEY=<strong secret>
 ```
 
@@ -28,6 +31,7 @@ UNIFACT_URL=https://<unifact-service-host>
 UNIFACT_API_KEY=<same value as UNIFACT_MASTER_KEY or scoped API key>
 ```
 
+When those are set, dahg-ai writes interview facts to this registry on deploy (namespaces `smb.<agentId>.<category>`), reads them at chat time, and exposes a facts UI at `/facts/<agentId>`.
 ## Recommended Network Setup
 
 For the first integration:

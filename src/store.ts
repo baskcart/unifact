@@ -290,32 +290,30 @@ export function agentProfileFromRow(row: AgentProfileRow): AgentProfileResponse 
     };
 }
 
-export function getFactRow(namespace: string, key: string): FactRow | undefined {
-    return db.prepare(`
+export async function getFactRow(namespace: string, key: string): Promise<FactRow | undefined> {
+    return db.get<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
       WHERE namespace = ? AND key = ?
-    `).get(namespace, key) as FactRow | undefined;
+    `, [namespace, key]);
 }
 
-export function listFacts(namespace: string): FactRow[] {
-    return db.prepare(`
+export async function listFacts(namespace: string): Promise<FactRow[]> {
+    return db.all<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
       WHERE namespace = ?
       ORDER BY key
-    `).all(namespace) as FactRow[];
+    `, [namespace]);
 }
 
-export function searchFacts(query: string): FactRow[] {
-    return db.prepare(`
+export async function searchFacts(query: string): Promise<FactRow[]> {
+    return db.all<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
-      WHERE rowid IN (
-        SELECT rowid FROM facts_fts WHERE facts_fts MATCH ?
-      )
+      WHERE ${db.factSearchClause()}
       ORDER BY namespace, key
-    `).all(query) as FactRow[];
+    `, [query]);
 }
 
 export function factVersionFromRow(row: FactVersionRow): FactVersionResponse {
@@ -333,14 +331,14 @@ export function factVersionFromRow(row: FactVersionRow): FactVersionResponse {
     };
 }
 
-function recordFactVersion(row: FactRow, event: string, author: string | null, changeReason: string | null, now: number) {
-    db.prepare(`
+async function recordFactVersion(row: FactRow, event: string, author: string | null, changeReason: string | null, now: number) {
+    await db.run(`
       INSERT INTO fact_versions (
         namespace, key, version, event, registry_channel, snapshot,
         author, change_reason, created_at
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
         row.namespace,
         row.key,
         row.version,
@@ -350,7 +348,7 @@ function recordFactVersion(row: FactRow, event: string, author: string | null, c
         author,
         changeReason,
         now
-    );
+    ]);
 }
 
 function requestedVersionEvent(input: InputRecord, action: 'CREATE' | 'UPDATE'): string {
@@ -364,31 +362,31 @@ function versionAuthor(columns: FactColumns): string | null {
     return columns.published_by ?? columns.approved_by ?? columns.created_by;
 }
 
-export function listFactVersions(namespace: string, key: string): FactVersionResponse[] {
-    const rows = db.prepare(`
+export async function listFactVersions(namespace: string, key: string): Promise<FactVersionResponse[]> {
+    const rows = await db.all<FactVersionRow>(`
       SELECT id, namespace, key, version, event, registry_channel,
              snapshot, author, change_reason, created_at
       FROM fact_versions
       WHERE namespace = ? AND key = ?
       ORDER BY id DESC
-    `).all(namespace, key) as FactVersionRow[];
+    `, [namespace, key]);
 
     return rows.map(factVersionFromRow);
 }
 
-export function upsertFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+export async function upsertFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const storedValue = serializeValue(input.value);
     const now = Date.now();
-    const existing = getFactRow(namespace, key);
+    const existing = await getFactRow(namespace, key);
     const columns = buildFactColumns(input, existing);
     const action: 'CREATE' | 'UPDATE' = existing ? 'UPDATE' : 'CREATE';
     const event = requestedVersionEvent(input, action);
     const nextVersion = existing ? existing.version + 1 : 1;
     const oldSnapshot = existing ? JSON.stringify(factFromRow(existing)) : null;
 
-    const saved = db.transaction(() => {
+    const saved = await db.transaction(async () => {
         if (existing) {
-            db.prepare(`
+            await db.run(`
               UPDATE facts
               SET value = ?, description = ?, fact_type = ?, subject = ?, scope = ?,
                   status = ?, derivation = ?, confidence = ?, source = ?, evidence = ?,
@@ -399,7 +397,7 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
                   published_by = ?, change_reason = ?, supersedes = ?, superseded_by = ?,
                   updated_at = ?
               WHERE namespace = ? AND key = ?
-            `).run(
+            `, [
                 storedValue,
                 columns.description,
                 columns.fact_type,
@@ -433,9 +431,9 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
                 now,
                 namespace,
                 key
-            );
+            ]);
         } else {
-            db.prepare(`
+            await db.run(`
               INSERT INTO facts (
                 namespace, key, value, description, fact_type, subject, scope,
                 status, derivation, confidence, source, evidence, valid_from,
@@ -446,7 +444,7 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
                 superseded_by, created_at, updated_at
               )
               VALUES (${Array(34).fill('?').join(', ')})
-            `).run(
+            `, [
                 namespace,
                 key,
                 storedValue,
@@ -481,21 +479,21 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
                 columns.superseded_by,
                 now,
                 now
-            );
+            ]);
         }
 
-        const savedRow = getFactRow(namespace, key);
+        const savedRow = await getFactRow(namespace, key);
         if (!savedRow) {
             throw new Error(`Failed to load saved fact '${namespace}/${key}'`);
         }
 
-        db.prepare(`
+        await db.run(`
           INSERT INTO audit_log (
             action, namespace, key, old_value, new_value, old_snapshot,
             new_snapshot, timestamp
           )
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
+        `, [
             action,
             namespace,
             key,
@@ -504,11 +502,11 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
             oldSnapshot,
             JSON.stringify(factFromRow(savedRow)),
             now
-        );
+        ]);
 
-        recordFactVersion(savedRow, event, versionAuthor(columns), columns.change_reason, now);
+        await recordFactVersion(savedRow, event, versionAuthor(columns), columns.change_reason, now);
         return savedRow;
-    })() as FactRow;
+    });
 
     return {
         success: true,
@@ -517,54 +515,55 @@ export function upsertFact(namespace: string, key: string, input: InputRecord): 
     };
 }
 
-export function deleteFact(namespace: string, key: string): boolean {
-    const existing = getFactRow(namespace, key);
+export async function deleteFact(namespace: string, key: string): Promise<boolean> {
+    const existing = await getFactRow(namespace, key);
     if (!existing) {
         return false;
     }
 
     const now = Date.now();
-    db.transaction(() => {
-        recordFactVersion(existing, 'delete', existing.created_by, existing.change_reason, now);
-        db.prepare('DELETE FROM facts WHERE namespace = ? AND key = ?').run(namespace, key);
-        db.prepare(`
+    await db.transaction(async () => {
+        await recordFactVersion(existing, 'delete', existing.created_by, existing.change_reason, now);
+        await db.run('DELETE FROM facts WHERE namespace = ? AND key = ?', [namespace, key]);
+        await db.run(`
           INSERT INTO audit_log (
             action, namespace, key, old_value, new_value, old_snapshot,
             new_snapshot, timestamp
           )
           VALUES ('DELETE', ?, ?, ?, NULL, ?, NULL, ?)
-        `).run(namespace, key, existing.value, JSON.stringify(factFromRow(existing)), now);
-    })();
+        `, [namespace, key, existing.value, JSON.stringify(factFromRow(existing)), now]);
+    });
 
     return true;
 }
-export function getAgentProfileRow(id: string): AgentProfileRow | undefined {
-    return db.prepare(`
+
+export async function getAgentProfileRow(id: string): Promise<AgentProfileRow | undefined> {
+    return db.get<AgentProfileRow>(`
       SELECT ${AGENT_PROFILE_SELECT_COLUMNS}
       FROM agent_profiles
       WHERE id = ?
-    `).get(id) as AgentProfileRow | undefined;
+    `, [id]);
 }
 
-export function listAgentProfiles(): AgentProfileResponse[] {
-    const rows = db.prepare(`
+export async function listAgentProfiles(): Promise<AgentProfileResponse[]> {
+    const rows = await db.all<AgentProfileRow>(`
       SELECT ${AGENT_PROFILE_SELECT_COLUMNS}
       FROM agent_profiles
       ORDER BY name
-    `).all() as AgentProfileRow[];
+    `);
 
     return rows.map(agentProfileFromRow);
 }
 
-export function upsertAgentProfile(id: string, input: InputRecord): UpsertAgentProfileResult {
+export async function upsertAgentProfile(id: string, input: InputRecord): Promise<UpsertAgentProfileResult> {
     const now = Date.now();
-    const existing = getAgentProfileRow(id);
+    const existing = await getAgentProfileRow(id);
     const columns = buildAgentProfileColumns(id, input, existing);
     const action: 'CREATE' | 'UPDATE' = existing ? 'UPDATE' : 'CREATE';
 
-    const saved = db.transaction(() => {
+    const saved = await db.transaction(async () => {
         if (existing) {
-            db.prepare(`
+            await db.run(`
               UPDATE agent_profiles
               SET name = ?, description = ?, role = ?, allowed_fact_types = ?,
                   writable_fact_types = ?, relevant_scopes = ?, relevant_subjects = ?,
@@ -572,7 +571,7 @@ export function upsertAgentProfile(id: string, input: InputRecord): UpsertAgentP
                   can_approve_facts = ?, allowed_actions = ?,
                   requires_human_approval_for = ?, updated_at = ?
               WHERE id = ?
-            `).run(
+            `, [
                 columns.name,
                 columns.description,
                 columns.role,
@@ -588,9 +587,9 @@ export function upsertAgentProfile(id: string, input: InputRecord): UpsertAgentP
                 columns.requires_human_approval_for,
                 now,
                 id
-            );
+            ]);
         } else {
-            db.prepare(`
+            await db.run(`
               INSERT INTO agent_profiles (
                 id, name, description, role, allowed_fact_types,
                 writable_fact_types, relevant_scopes, relevant_subjects, intents,
@@ -598,7 +597,7 @@ export function upsertAgentProfile(id: string, input: InputRecord): UpsertAgentP
                 allowed_actions, requires_human_approval_for, created_at, updated_at
               )
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(
+            `, [
                 id,
                 columns.name,
                 columns.description,
@@ -615,15 +614,15 @@ export function upsertAgentProfile(id: string, input: InputRecord): UpsertAgentP
                 columns.requires_human_approval_for,
                 now,
                 now
-            );
+            ]);
         }
 
-        const savedRow = getAgentProfileRow(id);
+        const savedRow = await getAgentProfileRow(id);
         if (!savedRow) {
             throw new Error(`Failed to load saved agent profile '${id}'`);
         }
         return savedRow;
-    })() as AgentProfileRow;
+    });
 
     return {
         success: true,
@@ -632,13 +631,13 @@ export function upsertAgentProfile(id: string, input: InputRecord): UpsertAgentP
     };
 }
 
-export function deleteAgentProfile(id: string): boolean {
-    const existing = getAgentProfileRow(id);
+export async function deleteAgentProfile(id: string): Promise<boolean> {
+    const existing = await getAgentProfileRow(id);
     if (!existing) {
         return false;
     }
 
-    db.prepare('DELETE FROM agent_profiles WHERE id = ?').run(id);
+    await db.run('DELETE FROM agent_profiles WHERE id = ?', [id]);
     return true;
 }
 
@@ -789,8 +788,8 @@ function rankFact(row: FactRow, profile: AgentProfileResponse | null, query: Rel
     };
 }
 
-export function findRelevantFacts(query: RelevantFactQuery): { profile: AgentProfileResponse | null; results: RelevantFactResult[]; count: number } {
-    const profileRow = query.profile_id ? getAgentProfileRow(query.profile_id) : undefined;
+export async function findRelevantFacts(query: RelevantFactQuery): Promise<{ profile: AgentProfileResponse | null; results: RelevantFactResult[]; count: number }> {
+    const profileRow = query.profile_id ? await getAgentProfileRow(query.profile_id) : undefined;
     if (query.profile_id && !profileRow) {
         throw new Error(`Agent profile '${query.profile_id}' not found`);
     }
@@ -800,7 +799,7 @@ export function findRelevantFacts(query: RelevantFactQuery): { profile: AgentPro
     const params: unknown[] = [];
 
     if (query.query) {
-        clauses.push('rowid IN (SELECT rowid FROM facts_fts WHERE facts_fts MATCH ?)');
+        clauses.push(db.factSearchClause());
         params.push(query.query);
     }
     if (query.namespace) {
@@ -838,12 +837,12 @@ export function findRelevantFacts(query: RelevantFactQuery): { profile: AgentPro
     }
 
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    const rows = db.prepare(`
+    const rows = await db.all<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
       ${where}
       ORDER BY updated_at DESC
-    `).all(...params) as FactRow[];
+    `, params);
 
     const ranked = rows
         .map(row => rankFact(row, profile, query))
@@ -858,8 +857,8 @@ export function findRelevantFacts(query: RelevantFactQuery): { profile: AgentPro
     };
 }
 
-export function proposeFactFromProfile(profileId: string, namespace: string, key: string, input: InputRecord): UpsertFactResult {
-    const profileRow = getAgentProfileRow(profileId);
+export async function proposeFactFromProfile(profileId: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+    const profileRow = await getAgentProfileRow(profileId);
     if (!profileRow) {
         throw new Error(`Agent profile '${profileId}' not found`);
     }
@@ -897,8 +896,9 @@ export function proposeFactFromProfile(profileId: string, namespace: string, key
 
     return upsertFact(namespace, key, proposed);
 }
-function transitionFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
-    const existing = getFactRow(namespace, key);
+
+async function transitionFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
+    const existing = await getFactRow(namespace, key);
     if (!existing) {
         throw new Error(`Fact '${key}' not found in namespace '${namespace}'`);
     }
@@ -937,7 +937,7 @@ function transitionFact(namespace: string, key: string, input: InputRecord): Ups
     });
 }
 
-export function reviewFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+export async function reviewFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const approved = hasOwn(input, 'approved') ? normalizeBoolean(input.approved, 'approved') : true;
     const reviewer = normalizeNullableString(input.reviewed_by ?? input.approved_by, 'reviewed_by');
 
@@ -951,7 +951,7 @@ export function reviewFact(namespace: string, key: string, input: InputRecord): 
     });
 }
 
-export function publishFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+export async function publishFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const now = Date.now();
     const publisher = normalizeNullableString(input.published_by ?? input.approved_by, 'published_by');
 
@@ -967,7 +967,7 @@ export function publishFact(namespace: string, key: string, input: InputRecord):
     });
 }
 
-export function retractFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+export async function retractFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     return transitionFact(namespace, key, {
         ...input,
         registry_channel: 'retracted',
@@ -977,7 +977,7 @@ export function retractFact(namespace: string, key: string, input: InputRecord):
     });
 }
 
-export function supersedeFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+export async function supersedeFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const supersededBy = normalizeRequiredString(input.superseded_by, 'superseded_by');
 
     return transitionFact(namespace, key, {
@@ -989,7 +989,7 @@ export function supersedeFact(namespace: string, key: string, input: InputRecord
     });
 }
 
-export function pullFactsForAgent(query: RelevantFactQuery): { profile: AgentProfileResponse | null; results: RelevantFactResult[]; count: number } {
+export async function pullFactsForAgent(query: RelevantFactQuery): Promise<{ profile: AgentProfileResponse | null; results: RelevantFactResult[]; count: number }> {
     return findRelevantFacts({
         ...query,
         published_only: query.published_only ?? true
@@ -1023,7 +1023,7 @@ export interface RegistryMetadata {
     };
 }
 
-export function listReviewQueue(query: ReviewQueueQuery = {}): ReviewQueueResult {
+export async function listReviewQueue(query: ReviewQueueQuery = {}): Promise<ReviewQueueResult> {
     const clauses = ["registry_channel IN ('proposed', 'review')"];
     const params: unknown[] = [];
 
@@ -1032,7 +1032,7 @@ export function listReviewQueue(query: ReviewQueueQuery = {}): ReviewQueueResult
         params.push(query.namespace);
     }
 
-    const rows = db.prepare(`
+    const rows = await db.all<FactRow>(`
       SELECT ${FACT_SELECT_COLUMNS}
       FROM facts
       WHERE ${clauses.join(' AND ')}
@@ -1045,7 +1045,7 @@ export function listReviewQueue(query: ReviewQueueQuery = {}): ReviewQueueResult
         END,
         updated_at DESC
       LIMIT ?
-    `).all(...params, clampLimit(query.limit)) as FactRow[];
+    `, [...params, clampLimit(query.limit)]);
 
     const facts = rows.map(factFromRow);
     return {
@@ -1054,13 +1054,13 @@ export function listReviewQueue(query: ReviewQueueQuery = {}): ReviewQueueResult
     };
 }
 
-export function approveFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+export async function approveFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const reviewer = normalizeNullableString(
         input.reviewed_by ?? input.approved_by ?? input.published_by,
         'reviewed_by'
     );
 
-    reviewFact(namespace, key, {
+    await reviewFact(namespace, key, {
         ...input,
         approved: true,
         reviewed_by: reviewer,
@@ -1074,7 +1074,7 @@ export function approveFact(namespace: string, key: string, input: InputRecord):
     });
 }
 
-export function rejectFact(namespace: string, key: string, input: InputRecord): UpsertFactResult {
+export async function rejectFact(namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const reviewer = normalizeNullableString(input.reviewed_by ?? input.approved_by, 'reviewed_by');
 
     return transitionFact(namespace, key, {
@@ -1087,8 +1087,8 @@ export function rejectFact(namespace: string, key: string, input: InputRecord): 
     });
 }
 
-export function getRegistryMetadata(): RegistryMetadata {
-    const config = getSyncConfig();
+export async function getRegistryMetadata(): Promise<RegistryMetadata> {
+    const config = await getSyncConfig();
     const provider = normalizeNullableString(process.env.UNIFACT_DEPLOYMENT_PROVIDER, 'UNIFACT_DEPLOYMENT_PROVIDER');
     const metadata: RegistryMetadata = {
         service: 'unifact',
@@ -1147,12 +1147,12 @@ export interface SyncStatusResult {
 }
 
 export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPullResult> {
-    const config = getSyncConfig();
+    const config = await getSyncConfig();
     if (!config.enabled || !config.upstreamUrl || !config.apiKey) {
-        throw new Error('Upstream registry not configured. Set UNIFACT_UPSTREAM_REGISTRY_URL and UNIFACT_API_KEY.');
+        throw new Error('Upstream registry not configured. Set company.infrastructure/upstream-registry-url and create an enabled API key (uni key create --person you).');
     }
 
-    const remoteUrl = getRemoteBranchUrl();
+    const remoteUrl = await getRemoteBranchUrl();
     if (!remoteUrl) {
         throw new Error('Could not determine remote URL');
     }
@@ -1181,7 +1181,7 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
             const remoteFacts = Array.isArray(data) ? data : (data.facts || []);
 
             for (const remoteFact of remoteFacts) {
-                const existing = getFactRow(remoteFact.namespace, remoteFact.key);
+                const existing = await getFactRow(remoteFact.namespace, remoteFact.key);
 
                 if (existing) {
                     if (existing.version >= remoteFact.version) {
@@ -1194,7 +1194,7 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
                     }
                 }
 
-                const result = upsertFact(remoteFact.namespace, remoteFact.key, remoteFact);
+                const result = await upsertFact(remoteFact.namespace, remoteFact.key, remoteFact);
                 pulled++;
                 pulledFacts.push(result.fact);
             }
@@ -1213,12 +1213,12 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
 }
 
 export async function pushFactsToRemote(namespaces?: string[]): Promise<SyncPushResult> {
-    const config = getSyncConfig();
+    const config = await getSyncConfig();
     if (!config.enabled || !config.upstreamUrl || !config.apiKey) {
-        throw new Error('Upstream registry not configured. Set UNIFACT_UPSTREAM_REGISTRY_URL and UNIFACT_API_KEY.');
+        throw new Error('Upstream registry not configured. Set company.infrastructure/upstream-registry-url and create an enabled API key (uni key create --person you).');
     }
 
-    const remoteUrl = getRemoteBranchUrl();
+    const remoteUrl = await getRemoteBranchUrl();
     if (!remoteUrl) {
         throw new Error('Could not determine remote URL');
     }
@@ -1230,7 +1230,7 @@ export async function pushFactsToRemote(namespaces?: string[]): Promise<SyncPush
         const pushedFacts: FactResponse[] = [];
 
         for (const namespace of targetNamespaces) {
-            const localFacts = listFacts(namespace).filter(f => 
+            const localFacts = (await listFacts(namespace)).filter(f =>
                 f.registry_channel === 'proposed' || f.registry_channel === 'working'
             );
 
@@ -1277,14 +1277,14 @@ export async function pushFactsToRemote(namespaces?: string[]): Promise<SyncPush
     }
 }
 
-export function getSyncStatus(): SyncStatusResult {
-    const config = getSyncConfig();
-    const localCount = db.prepare('SELECT COUNT(*) as count FROM facts').get() as { count: number };
-    const reviewQueue = db.prepare(`
+export async function getSyncStatus(): Promise<SyncStatusResult> {
+    const config = await getSyncConfig();
+    const localCount = await db.get<{ count: number }>('SELECT COUNT(*) as count FROM facts');
+    const reviewQueue = await db.get<{ count: number }>(`
       SELECT COUNT(*) as count
       FROM facts
       WHERE registry_channel IN ('proposed', 'review')
-    `).get() as { count: number };
+    `);
 
     return {
         enabled: config.enabled,
@@ -1293,8 +1293,8 @@ export function getSyncStatus(): SyncStatusResult {
         role: config.role,
         branch: config.branch,
         source: config.source,
-        localFacts: localCount.count,
-        reviewQueue: reviewQueue.count,
+        localFacts: localCount?.count ?? 0,
+        reviewQueue: reviewQueue?.count ?? 0,
         lastSync: null
     };
 }

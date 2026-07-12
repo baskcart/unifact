@@ -1,7 +1,7 @@
 {
   "name": "unifact",
   "version": "0.2.0",
-  "description": "Structured fact store for AI agents",
+  "description": "Governed fact registry for organizations — unique facts with provenance, versions, and approval",
   "main": "dist/api.js",
   "scripts": {
     "dev": "tsx watch src/api.ts",
@@ -9,9 +9,11 @@
     "seed": "tsx src/seed.ts",
     "build": "tsc",
     "mcp": "tsx src/mcp.ts",
-    "cli": "tsx src/cli.ts"
+    "cli": "tsx src/cli.ts",
+    "uni": "tsx src/cli.ts"
   },
   "bin": {
+    "uni": "./dist/cli.js",
     "unifact": "./dist/cli.js"
   },
   "dependencies": {
@@ -19,6 +21,7 @@
     "better-sqlite3": "12.11.1",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "pg": "^8.22.0",
     "yaml": "^2.4.5",
     "zod": "^4.4.3"
   },
@@ -26,6 +29,7 @@
     "@types/better-sqlite3": "^7.6.11",
     "@types/express": "^4.17.21",
     "@types/node": "^20.14.9",
+    "@types/pg": "^8.20.0",
     "tsx": "^4.15.7",
     "typescript": "^5.4.5"
   }

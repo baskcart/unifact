@@ -121,12 +121,12 @@ function errorResult(message: string) {
 server.registerTool('list_namespaces', {
     description: 'List namespaces in the UniFact store with fact counts'
 }, async () => {
-    const rows = db.prepare(`
+    const rows = await db.all<{ namespace: string; count: number }>(`
       SELECT namespace, COUNT(*) AS count
       FROM facts
       GROUP BY namespace
       ORDER BY namespace
-    `).all() as { namespace: string; count: number }[];
+    `);
 
     return toolResult({
         namespaces: rows,
@@ -137,7 +137,7 @@ server.registerTool('list_namespaces', {
 server.registerTool('registry_metadata', {
     description: 'Get cloud-neutral Unifact registry metadata, capabilities, tenant isolation, and upstream configuration'
 }, async () => {
-    return toolResult(getRegistryMetadata());
+    return toolResult(await getRegistryMetadata());
 });
 
 server.registerTool('list_facts', {
@@ -146,7 +146,7 @@ server.registerTool('list_facts', {
         namespace: z.string().min(1).describe('Namespace to list, for example company.decisions')
     }
 }, async ({ namespace }) => {
-    const facts = listFacts(namespace).map(factFromRow);
+    const facts = (await listFacts(namespace)).map(factFromRow);
     return toolResult({
         namespace,
         facts,
@@ -161,7 +161,7 @@ server.registerTool('get_fact', {
         key: z.string().min(1).describe('Fact key')
     }
 }, async ({ namespace, key }) => {
-    const row = getFactRow(namespace, key);
+    const row = await getFactRow(namespace, key);
 
     if (!row) {
         return errorResult(`Fact '${key}' not found in namespace '${namespace}'`);
@@ -173,13 +173,13 @@ server.registerTool('get_fact', {
 });
 
 server.registerTool('search_facts', {
-    description: 'Search facts using SQLite FTS5 query syntax',
+    description: 'Search facts (SQLite FTS5 locally; PostgreSQL plainto_tsquery on staging)',
     inputSchema: {
         query: z.string().min(1).describe('Full-text search query')
     }
 }, async ({ query }) => {
     try {
-        const facts = searchFacts(query).map(factFromRow);
+        const facts = (await searchFacts(query)).map(factFromRow);
         return toolResult({
             query,
             facts,
@@ -210,7 +210,7 @@ server.registerTool('find_relevant_facts', {
     }
 }, async (args) => {
     try {
-        return toolResult(findRelevantFacts(args));
+        return toolResult(await findRelevantFacts(args));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -235,7 +235,7 @@ server.registerTool('pull_facts_for_agent', {
     }
 }, async (args) => {
     try {
-        return toolResult(pullFactsForAgent(args));
+        return toolResult(await pullFactsForAgent(args));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -253,7 +253,7 @@ server.registerTool('upsert_fact', {
 }, async (args) => {
     try {
         const { namespace, key, ...input } = args;
-        return toolResult(upsertFact(namespace, key, input));
+        return toolResult(await upsertFact(namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -273,7 +273,7 @@ server.registerTool('propose_fact', {
 }, async (args) => {
     try {
         const { profile_id, namespace, key, ...input } = args;
-        return toolResult(proposeFactFromProfile(profile_id, namespace, key, input));
+        return toolResult(await proposeFactFromProfile(profile_id, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -287,7 +287,7 @@ server.registerTool('list_fact_versions', {
         key: z.string().min(1).describe('Fact key')
     }
 }, async ({ namespace, key }) => {
-    return toolResult({ namespace, key, versions: listFactVersions(namespace, key) });
+    return toolResult({ namespace, key, versions: await listFactVersions(namespace, key) });
 });
 
 server.registerTool('list_review_queue', {
@@ -297,7 +297,7 @@ server.registerTool('list_review_queue', {
         limit: z.number().int().min(1).max(500).optional().describe('Maximum facts to return')
     }
 }, async (args) => {
-    return toolResult(listReviewQueue(args));
+    return toolResult(await listReviewQueue(args));
 });
 
 server.registerTool('approve_fact', {
@@ -311,7 +311,7 @@ server.registerTool('approve_fact', {
 }, async (args) => {
     try {
         const { namespace, key, ...input } = args;
-        return toolResult(approveFact(namespace, key, input));
+        return toolResult(await approveFact(namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -328,7 +328,7 @@ server.registerTool('reject_fact', {
 }, async (args) => {
     try {
         const { namespace, key, ...input } = args;
-        return toolResult(rejectFact(namespace, key, input));
+        return toolResult(await rejectFact(namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -346,7 +346,7 @@ server.registerTool('review_fact', {
 }, async (args) => {
     try {
         const { namespace, key, ...input } = args;
-        return toolResult(reviewFact(namespace, key, input));
+        return toolResult(await reviewFact(namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -363,7 +363,7 @@ server.registerTool('publish_fact', {
 }, async (args) => {
     try {
         const { namespace, key, ...input } = args;
-        return toolResult(publishFact(namespace, key, input));
+        return toolResult(await publishFact(namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -380,7 +380,7 @@ server.registerTool('supersede_fact', {
 }, async (args) => {
     try {
         const { namespace, key, ...input } = args;
-        return toolResult(supersedeFact(namespace, key, input));
+        return toolResult(await supersedeFact(namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -396,7 +396,7 @@ server.registerTool('retract_fact', {
 }, async (args) => {
     try {
         const { namespace, key, ...input } = args;
-        return toolResult(retractFact(namespace, key, input));
+        return toolResult(await retractFact(namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -408,7 +408,7 @@ server.registerTool('delete_fact', {
         key: z.string().min(1).describe('Fact key')
     }
 }, async ({ namespace, key }) => {
-    const deleted = deleteFact(namespace, key);
+    const deleted = await deleteFact(namespace, key);
     if (!deleted) {
         return errorResult(`Fact '${key}' not found in namespace '${namespace}'`);
     }
@@ -428,13 +428,13 @@ server.registerTool('audit_fact', {
         key: z.string().min(1).describe('Fact key')
     }
 }, async ({ namespace, key }) => {
-    const rows = db.prepare(`
+    const rows = await db.all<AuditLogRow>(`
       SELECT id, action, namespace, key, old_value, new_value,
              old_snapshot, new_snapshot, timestamp
       FROM audit_log
       WHERE namespace = ? AND key = ?
       ORDER BY timestamp DESC
-    `).all(namespace, key) as AuditLogRow[];
+    `, [namespace, key]);
 
     return toolResult({
         namespace,
@@ -447,7 +447,7 @@ server.registerTool('audit_fact', {
 server.registerTool('list_agent_profiles', {
     description: 'List configured agent profiles and their fact/action permissions'
 }, async () => {
-    const profiles = listAgentProfiles();
+    const profiles = await listAgentProfiles();
     return toolResult({ profiles, count: profiles.length });
 });
 
@@ -457,12 +457,13 @@ server.registerTool('get_agent_profile', {
         id: z.string().min(1).describe('Agent profile id')
     }
 }, async ({ id }) => {
-    const row = getAgentProfileRow(id);
+    const row = await getAgentProfileRow(id);
     if (!row) {
         return errorResult(`Agent profile '${id}' not found`);
     }
 
-    const profile = listAgentProfiles().find(item => item.id === id);
+    const profiles = await listAgentProfiles();
+    const profile = profiles.find(item => item.id === id);
     return toolResult({ profile });
 });
 
@@ -475,7 +476,7 @@ server.registerTool('upsert_agent_profile', {
 }, async (args) => {
     try {
         const { id, ...input } = args;
-        return toolResult(upsertAgentProfile(id, input));
+        return toolResult(await upsertAgentProfile(id, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -487,7 +488,7 @@ server.registerTool('delete_agent_profile', {
         id: z.string().min(1).describe('Agent profile id')
     }
 }, async ({ id }) => {
-    const deleted = deleteAgentProfile(id);
+    const deleted = await deleteAgentProfile(id);
     if (!deleted) {
         return errorResult(`Agent profile '${id}' not found`);
     }
@@ -499,7 +500,7 @@ server.registerTool('sync_status', {
     description: 'Get upstream staging registry status and configuration'
 }, async () => {
     try {
-        return toolResult(getSyncStatus());
+        return toolResult(await getSyncStatus());
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }

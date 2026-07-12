@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { db } from './db.js';
+import { getActiveLocalApiKey } from './keys.js';
 
 export interface SyncConfig {
     upstreamUrl: string | null;
@@ -9,25 +10,27 @@ export interface SyncConfig {
     branch: string;
     enabled: boolean;
     source: 'env' | 'fact' | 'none';
+    person: string | null;
 }
 
-function getConfigFact(key: string): string | null {
-    const row = db.prepare(`
+async function getConfigFact(key: string): Promise<string | null> {
+    const row = await db.get<{ value: string }>(`
       SELECT value
       FROM facts
       WHERE namespace = 'company.infrastructure' AND key = ?
-    `).get(key) as { value: string } | undefined;
+    `, [key]);
 
     return row?.value ?? null;
 }
 
-export function getSyncConfig(): SyncConfig {
-    const urlFact = getConfigFact('upstream-registry-url') ?? getConfigFact('remote-registry-url');
-    const roleFact = getConfigFact('upstream-registry-role') ?? getConfigFact('remote-registry-branch');
+export async function getSyncConfig(): Promise<SyncConfig> {
+    const urlFact = (await getConfigFact('upstream-registry-url')) ?? (await getConfigFact('remote-registry-url'));
+    const roleFact = (await getConfigFact('upstream-registry-role')) ?? (await getConfigFact('remote-registry-branch'));
 
-    const upstreamUrl = urlFact || process.env.UNIFACT_UPSTREAM_REGISTRY_URL || process.env.UNIFACT_REMOTE_URL || null;
-    const apiKey = process.env.UNIFACT_API_KEY || process.env.UNIFACT_MASTER_KEY || null;
-    const role = roleFact || process.env.UNIFACT_UPSTREAM_REGISTRY_ROLE || process.env.UNIFACT_BRANCH || 'staging';
+    const upstreamUrl = urlFact || process.env.UNIFACT_UPSTREAM_REGISTRY_URL || null;
+    const active = await getActiveLocalApiKey();
+    const apiKey = active?.api_key ?? null;
+    const role = roleFact || process.env.UNIFACT_UPSTREAM_REGISTRY_ROLE || 'staging';
     const source = urlFact ? 'fact' : upstreamUrl ? 'env' : 'none';
 
     return {
@@ -37,12 +40,13 @@ export function getSyncConfig(): SyncConfig {
         role,
         branch: role,
         enabled: Boolean(upstreamUrl && apiKey),
-        source
+        source,
+        person: active?.person ?? null
     };
 }
 
-export function getRemoteBranchUrl(branch?: string): string | null {
-    const config = getSyncConfig();
+export async function getRemoteBranchUrl(_branch?: string): Promise<string | null> {
+    const config = await getSyncConfig();
     if (!config.upstreamUrl) return null;
 
     return config.upstreamUrl.replace(/\/$/, '');

@@ -34,6 +34,7 @@ import {
     getSyncStatus,
     listAgentProfiles,
     listFacts,
+    listFactNamespaces,
     listFactVersions,
     listReviewQueue,
     proposeFactFromProfile,
@@ -113,7 +114,16 @@ app.post('/v1/keys', requireAuthOrBootstrap('write'), async (req: Request, res: 
             : undefined;
         const apiKey = typeof body.api_key === 'string' ? body.api_key : undefined;
         const enabled = body.enabled === false ? false : true;
-        const key = await createApiKey({ person, namespaces, scopes, api_key: apiKey, enabled });
+        const registryName =
+            typeof body.registry_name === 'string' ? body.registry_name.trim() : undefined;
+        const key = await createApiKey({
+            person,
+            namespaces,
+            scopes,
+            api_key: apiKey,
+            enabled,
+            registry_name: registryName
+        });
         console.log(`[unifact] API key upserted for person=${key.person} enabled=${key.enabled}`);
         return res.json({ success: true, key });
     } catch (err) {
@@ -644,6 +654,27 @@ app.get('/v1/facts/_review-queue', requireAuth('read'), async (req: Request, res
         });
     } catch (err) {
         return handleError(res, err, 'Failed to load review queue');
+    }
+});
+
+/** Distinct namespaces with facts in the caller's org registry. */
+app.get('/v1/facts/_namespaces', requireAuth('read'), async (req: Request, res: Response) => {
+    const apiKey = getApiKey(req);
+    try {
+        const registry = await resolveRequestRegistry(req);
+        const namespaces = await listFactNamespaces(registry);
+        const allowed = await filterAuthorized(
+            namespaces.map(namespace => ({ namespace })),
+            apiKey,
+            row => row.namespace
+        );
+        return res.json({
+            registry,
+            namespaces: allowed.map(row => row.namespace),
+            count: allowed.length
+        });
+    } catch (err) {
+        return handleError(res, err, 'Failed to list namespaces');
     }
 });
 

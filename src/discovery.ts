@@ -24,6 +24,7 @@ export function unifactDiscoveryDocument(baseUrl?: string | null) {
             api_prefix: '/v1',
             create_registry: 'POST /v1/registries',
             ops_events: 'GET|POST /v1/ops/events',
+            fact_namespaces: 'GET /v1/facts/_namespaces',
             mcp_stdio: 'npm run mcp (see docs/mcp.md)'
         },
         auth: {

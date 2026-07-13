@@ -2,6 +2,22 @@
   "name": "unifact",
   "version": "0.2.0",
   "description": "Governed fact registry for organizations — unique facts with provenance, versions, and approval",
+  "keywords": [
+    "unifact",
+    "facts",
+    "mcp",
+    "agents",
+    "source-of-truth",
+    "organizational-knowledge",
+    "cursor",
+    "claude",
+    "codex"
+  ],
+  "homepage": "https://www.unifact.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baskcart/unifact.git"
+  },
   "main": "dist/api.js",
   "scripts": {
     "dev": "tsx watch src/api.ts",

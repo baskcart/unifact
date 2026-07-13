@@ -42,6 +42,7 @@ import {
     exportAuditLog,
     formatAuditExportCsv
 } from './store.js';
+import { listOpsEvents, type OpsEventKind } from './ops.js';
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
@@ -94,6 +95,9 @@ async function main() {
         case 'audit':
             await auditCommand(args);
             break;
+        case 'ops':
+            await opsCommand(args);
+            break;
         case 'extract':
             await extractCommand(args);
             break;
@@ -142,6 +146,7 @@ function printHelp() {
     console.log('  facts [Registry]                 # list facts (prompt if many orgs)');
     console.log('  extract <file.md> [--dry-run]    # doc → proposed facts (never auto-publish)');
     console.log('  audit [--format json|csv]        # export org audit log');
+    console.log('  ops events [--kind error|call] [--registry name]  # list ops_events');
     console.log('  registries                       # registries you own or belong to');
     console.log('');
     console.log('Sync:');
@@ -965,6 +970,32 @@ async function auditCommand(argv: string[]) {
         console.log(JSON.stringify({ registry, count: rows.length, entries: rows }, null, 2));
     } catch (error) {
         console.error('Audit failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function opsCommand(argv: string[]) {
+    const sub = positionalArgs(argv)[0] || 'events';
+    if (sub !== 'events') {
+        console.error('Usage: uni ops events [--kind error|call] [--registry name] [--limit N]');
+        process.exit(1);
+    }
+    try {
+        const kindRaw = (parseFlag(argv, '--kind') || '').toLowerCase();
+        const kind: OpsEventKind | undefined =
+            kindRaw === 'error' || kindRaw === 'call' ? kindRaw : undefined;
+        const limitFlag = parseFlag(argv, '--limit');
+        const limit = limitFlag ? Number(limitFlag) : 100;
+        const registryFlag = parseFlag(argv, '--registry');
+        const registry = registryFlag || (await resolveWorkingRegistry());
+        const events = await listOpsEvents({
+            registry_name: registry,
+            kind,
+            limit
+        });
+        console.log(JSON.stringify({ registry, count: events.length, events }, null, 2));
+    } catch (error) {
+        console.error('Ops failed:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
 }

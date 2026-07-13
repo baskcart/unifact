@@ -3,6 +3,7 @@ import express, { Request, Response } from 'express';
 import { db, AuditLogRow } from './db.js';
 import { formatFacts, FormatType, FactData } from './format.js';
 import { requireAuth, requireAuthOrBootstrap, allowPublicOrgCreate, hasAccess } from './auth.js';
+import { unifactDiscoveryDocument } from './discovery.js';
 import {
     createApiKey,
     findApiKeyBySecret,
@@ -19,6 +20,8 @@ import {
     resolveActiveRegistry,
     suspendJoin
 } from './registry.js';
+import { listOpsEvents, trackOpsEvent, type OpsEventKind } from './ops.js';
+import type { ApiKeyRecord } from './keys.js';
 import {
     approveFact,
     deleteAgentProfile,
@@ -63,6 +66,18 @@ app.get('/healthz', (_req: Request, res: Response) => {
         database: db.name
     });
 });
+
+/** Public framework discovery — no auth. */
+function sendDiscovery(req: Request, res: Response) {
+    const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
+    const host = (req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+    const base = host ? `${proto}://${host}` : null;
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.json(unifactDiscoveryDocument(base));
+}
+
+app.get('/.well-known/unifact.json', sendDiscovery);
+app.get('/v1/discovery', sendDiscovery);
 
 app.get('/v1/keys', requireAuthOrBootstrap('read'), async (req: Request, res: Response) => {
     try {
@@ -243,6 +258,13 @@ function getApiKey(req: Request): string | undefined {
     return undefined;
 }
 
+/** Platform / wildcard keys may attribute ops events to any org (or `_platform`). */
+function apiKeyCanCrossRegistryOps(key: ApiKeyRecord | undefined): boolean {
+    if (!key) return false;
+    if (!key.namespaces.length) return true;
+    return key.namespaces.includes('*');
+}
+
 /**
  * Resolve org registry from API key. Optional query/body registry_name must match (no cross-tenant).
  */
@@ -272,6 +294,41 @@ async function resolveRequestRegistry(req: Request): Promise<string> {
         throw err;
     }
 
+    return registryName;
+}
+
+/**
+ * Ops tenancy: default = key registry; any key may use `_platform`;
+ * wildcard (`*`) keys may set any registry_name.
+ */
+async function resolveOpsRegistry(req: Request, requested?: string | null): Promise<string> {
+    const secret = getApiKey(req);
+    const keyRecord = secret ? await findApiKeyBySecret(secret) : undefined;
+    const want = typeof requested === 'string' && requested.trim() ? requested.trim() : null;
+
+    if (want === '_platform') {
+        return '_platform';
+    }
+    if (want && apiKeyCanCrossRegistryOps(keyRecord)) {
+        return want;
+    }
+
+    let registryName = keyRecord?.registry_name?.trim() || null;
+    if (!registryName && keyRecord?.person) {
+        registryName = await resolveActiveRegistry(keyRecord.person);
+    }
+    if (!registryName) {
+        if (!want) return '_platform';
+        const err = new Error('API key has no registry_name');
+        (err as Error & { status?: number }).status = 400;
+        throw err;
+    }
+
+    if (want && want !== registryName) {
+        const err = new Error(`registry_name must match API key registry '${registryName}'`);
+        (err as Error & { status?: number }).status = 403;
+        throw err;
+    }
     return registryName;
 }
 
@@ -720,6 +777,69 @@ app.get('/v1/audit', requireAuth('read'), async (req: Request, res: Response) =>
         return res.json({ registry, count: rows.length, entries: rows });
     } catch (err) {
         return handleError(res, err, 'Failed to export audit log');
+    }
+});
+
+/** Increment an org-scoped ops counter (errors / calls). Not a fact. */
+app.post('/v1/ops/events', requireAuth('write'), async (req: Request, res: Response) => {
+    try {
+        const body = bodyAsRecord(req);
+        const kindRaw = String(body.kind || 'error').toLowerCase();
+        const kind: OpsEventKind = kindRaw === 'call' ? 'call' : 'error';
+        const registry = await resolveOpsRegistry(
+            req,
+            typeof body.registry_name === 'string' ? body.registry_name : null
+        );
+        const event = await trackOpsEvent({
+            registry_name: registry,
+            kind,
+            event_code: String(body.event_code || body.code || ''),
+            label: String(body.label || body.event_code || body.code || 'ops event'),
+            extra_context:
+                typeof body.extra_context === 'string'
+                    ? body.extra_context
+                    : typeof body.meta === 'string'
+                      ? body.meta
+                      : null,
+            env: typeof body.env === 'string' ? body.env : null,
+            source: typeof body.source === 'string' ? body.source : null
+        });
+        return res.json({ success: true, event });
+    } catch (err) {
+        return handleError(res, err, 'Failed to track ops event');
+    }
+});
+
+/** List ops events for the caller's org (wildcard keys may pass registry_name / omit for all). */
+app.get('/v1/ops/events', requireAuth('read'), async (req: Request, res: Response) => {
+    try {
+        const secret = getApiKey(req);
+        const keyRecord = secret ? await findApiKeyBySecret(secret) : undefined;
+        const requested = getQueryString(req, 'registry_name');
+        const kindRaw = getQueryString(req, 'kind');
+        const kind: OpsEventKind | undefined =
+            kindRaw === 'call' || kindRaw === 'error' ? kindRaw : undefined;
+        const limit = req.query.limit ? Number(req.query.limit) : 100;
+
+        let registryFilter: string | undefined;
+        if (apiKeyCanCrossRegistryOps(keyRecord)) {
+            registryFilter = requested || undefined;
+        } else {
+            registryFilter = await resolveOpsRegistry(req, requested);
+        }
+
+        const events = await listOpsEvents({
+            registry_name: registryFilter,
+            kind,
+            limit
+        });
+        return res.json({
+            registry: registryFilter ?? null,
+            count: events.length,
+            events
+        });
+    } catch (err) {
+        return handleError(res, err, 'Failed to list ops events');
     }
 });
 

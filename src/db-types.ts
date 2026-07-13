@@ -135,3 +135,18 @@ export interface JoinRequestRow {
     created_at: number;
     updated_at: number;
 }
+
+/** Org-scoped ops counters (errors/calls) — not facts. */
+export interface OpsEventRow {
+    id: number;
+    registry_name: string;
+    kind: string;
+    event_code: string;
+    event_count: number | string;
+    first_seen: number | string;
+    last_seen: number | string;
+    label: string;
+    extra_context: string | null;
+    env: string | null;
+    source: string | null;
+}

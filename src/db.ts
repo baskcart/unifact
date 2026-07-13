@@ -13,6 +13,7 @@ export type {
     FactRow,
     FactVersionRow,
     JoinRequestRow,
+    OpsEventRow,
     RegistryRow,
     RunResult
 } from './db-types.js';

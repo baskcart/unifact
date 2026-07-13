@@ -7,11 +7,12 @@ alwaysApply: true
 
 Applies to **work agents** (Cursor, Codex, Claude, Devin, Antigravity, Cowork, and similar) — not only code editors.
 
-For organizational truth, procedure, infra policy, naming, and “how we operate”:
+For organizational truth, procedure, infra policy, naming, branding, and “how we operate”:
 
-1. Use **UniFact MCP** — prefer `sync_pull`, then `search_facts` / `list_facts` / `find_relevant_facts`.
-2. Do **not** start from README, source spelunking, or guessing when the registry may already hold the answer.
-3. Propose via MCP (`propose_fact` / `upsert_fact`); never treat drafts as published truth until review/publish.
-4. CLI (`uni …`) is for humans and MCP-down fallback; MCP is the default agent path.
+1. **Fact Check first** — call UniFact MCP: prefer `sync_pull`, then `search_facts` / `list_facts` / `find_relevant_facts`.
+2. Do **not** invent org brand or product relationships from README, footers, repo names, or “Powered by” lines.
+3. If a needed fact is **missing**: ask the human one clarifying question, then `propose_fact` (or `upsert_fact` as proposed). Never assert it in public copy first.
+4. Propose via MCP; never treat drafts as published truth until review/publish.
+5. CLI (`uni …`) is for humans and MCP-down fallback; MCP is the default agent path.
 
 Setup: see `docs/mcp.md` and `.cursor/mcp.json.example`.

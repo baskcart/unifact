@@ -317,6 +317,21 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
         UNIQUE(registry_name, person)
       );
 
+      CREATE TABLE IF NOT EXISTS ops_events (
+        id BIGSERIAL PRIMARY KEY,
+        registry_name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        event_code TEXT NOT NULL,
+        event_count BIGINT NOT NULL DEFAULT 0,
+        first_seen BIGINT NOT NULL,
+        last_seen BIGINT NOT NULL,
+        label TEXT NOT NULL,
+        extra_context TEXT,
+        env TEXT,
+        source TEXT,
+        UNIQUE(registry_name, kind, event_code)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace);
       CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(fact_type);
       CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
@@ -332,6 +347,9 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_registries_owner ON registries(owner_person);
       CREATE INDEX IF NOT EXISTS idx_join_requests_registry ON join_requests(registry_name);
       CREATE INDEX IF NOT EXISTS idx_join_requests_status ON join_requests(status);
+      CREATE INDEX IF NOT EXISTS idx_ops_events_registry ON ops_events(registry_name);
+      CREATE INDEX IF NOT EXISTS idx_ops_events_last_seen ON ops_events(registry_name, last_seen);
+      CREATE INDEX IF NOT EXISTS idx_ops_events_kind ON ops_events(registry_name, kind);
     `);
 
     await pool.query(`

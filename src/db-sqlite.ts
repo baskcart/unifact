@@ -261,6 +261,8 @@ function initializeSchema(sqlite: Database.Database) {
         owner_person TEXT NOT NULL,
         description TEXT,
         git_url TEXT,
+        parent_registry TEXT,
+        lookup_visibility TEXT NOT NULL DEFAULT 'private',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -289,6 +291,26 @@ function initializeSchema(sqlite: Database.Database) {
         env TEXT,
         source TEXT,
         UNIQUE(registry_name, kind, event_code)
+      );
+
+      CREATE TABLE IF NOT EXISTS namespace_lookups (
+        id TEXT PRIMARY KEY,
+        registry_name TEXT NOT NULL,
+        from_namespace TEXT NOT NULL,
+        target_registry TEXT NOT NULL,
+        target_namespace TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(registry_name, from_namespace, target_registry, target_namespace)
+      );
+
+      CREATE TABLE IF NOT EXISTS public_namespaces (
+        id TEXT PRIMARY KEY,
+        registry_name TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(registry_name, namespace)
       );
     `);
 
@@ -336,6 +358,11 @@ function initializeSchema(sqlite: Database.Database) {
 
     ensureColumns(sqlite, 'api_keys', [
         { name: 'registry_name', definition: 'TEXT' }
+    ]);
+
+    ensureColumns(sqlite, 'registries', [
+        { name: 'parent_registry', definition: 'TEXT' },
+        { name: 'lookup_visibility', definition: "TEXT NOT NULL DEFAULT 'private'" }
     ]);
 
     migrateFactsToOrgPartition(sqlite);

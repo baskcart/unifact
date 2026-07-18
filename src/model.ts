@@ -122,6 +122,12 @@ export interface FactResponse {
     superseded_by: string | null;
     created_at: number;
     updated_at: number;
+    /**
+     * When resolved via registry lookup path: local = home registry, parent = ancestor.
+     * Parent facts are read-only for child members (writable: false).
+     */
+    lookup_source?: 'local' | 'parent' | 'lookup';
+    writable?: boolean;
 }
 
 export interface FactVersionResponse {

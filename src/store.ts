@@ -28,6 +28,9 @@ import {
 } from './model.js';
 import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
 import { apiKeyAllowsNamespace, findApiKeyBySecret, listApiKeys } from './keys.js';
+import { assertCanWriteRegistry } from './registry.js';
+import { namespaceChain } from './namespaces.js';
+import { assertNamespaceNameAvailable } from './naming.js';
 
 export const FACT_SELECT_COLUMNS = `
   rowid, registry_name, namespace, key, value, description, fact_type, subject, scope, status,
@@ -124,6 +127,8 @@ export interface RelevantFactQuery {
     published_only?: boolean;
     /** When true, include proposed/review/feedback/published (local/dev agents). */
     local_agent?: boolean;
+    /** Walk parent registry lookup path (default true). Parents are published-only. */
+    lookup?: boolean;
 }
 
 export interface RelevantFactResult {
@@ -408,6 +413,21 @@ export async function upsertFact(registryName: string, namespace: string, key: s
     const storedValue = serializeValue(input.value);
     const now = Date.now();
     const existing = await getFactRow(registryName, namespace, key);
+
+    // New namespace in this registry must not collide with a registry name.
+    if (!existing) {
+        const nsInUse = await db.get<{ n: number }>(
+            `
+          SELECT COUNT(*) AS n FROM facts
+          WHERE registry_name = ? AND lower(namespace) = lower(?)
+        `,
+            [registryName, namespace]
+        );
+        if ((nsInUse?.n ?? 0) === 0) {
+            await assertNamespaceNameAvailable(namespace);
+        }
+    }
+
     const columns = buildFactColumns(input, existing);
     const action: 'CREATE' | 'UPDATE' = existing ? 'UPDATE' : 'CREATE';
     const event = requestedVersionEvent(input, action);
@@ -828,69 +848,193 @@ export async function findRelevantFacts(query: RelevantFactQuery): Promise<{ pro
     }
 
     const profile = profileRow ? agentProfileFromRow(profileRow) : null;
-    const clauses: string[] = ['registry_name = ?'];
-    const params: unknown[] = [query.registry_name];
+    const homeRegistry = query.registry_name;
+    const useLookup = query.lookup !== false;
 
-    if (query.query) {
-        clauses.push(db.factSearchClause());
-        params.push(query.query);
-    }
-    if (query.namespace) {
-        clauses.push('namespace = ?');
-        params.push(query.namespace);
-    }
-    if (query.subject) {
-        clauses.push('subject = ?');
-        params.push(query.subject);
-    }
-    if (query.scope) {
-        clauses.push('scope = ?');
-        params.push(query.scope);
-    }
-    if (query.fact_type) {
-        clauses.push('fact_type = ?');
-        params.push(normalizeEnumValue(query.fact_type, FACT_TYPES, 'fact_type'));
-    }
-    if (query.actionability) {
-        clauses.push('actionability = ?');
-        params.push(normalizeEnumValue(query.actionability, FACT_ACTIONABILITIES, 'actionability'));
-    }
-    if (query.registry_channel) {
-        clauses.push('registry_channel = ?');
-        params.push(normalizeEnumValue(query.registry_channel, FACT_REGISTRY_CHANNELS, 'registry_channel'));
-    } else if (query.local_agent) {
-        const placeholders = LOCAL_AGENT_CHANNELS.map(() => '?').join(', ');
-        clauses.push(`registry_channel IN (${placeholders})`);
-        params.push(...LOCAL_AGENT_CHANNELS);
-    } else if (query.published_only) {
-        clauses.push("registry_channel = 'published'");
+    type Scope = { registry: string; namespaces: string[] | null; publishedOnly: boolean; source: 'local' | 'parent' | 'lookup' };
+    const scopes: Scope[] = [];
+
+    if (query.namespace && useLookup) {
+        const chain = namespaceChain(query.namespace);
+        scopes.push({
+            registry: homeRegistry,
+            namespaces: [chain[0]],
+            publishedOnly: false,
+            source: 'local'
+        });
+        if (chain.length > 1) {
+            scopes.push({
+                registry: homeRegistry,
+                namespaces: chain.slice(1),
+                publishedOnly: true,
+                source: 'parent'
+            });
+        }
+        // Explicit lookups for this namespace chain
+        await db.run(`
+          CREATE TABLE IF NOT EXISTS namespace_lookups (
+            id TEXT PRIMARY KEY,
+            registry_name TEXT NOT NULL,
+            from_namespace TEXT NOT NULL,
+            target_registry TEXT NOT NULL,
+            target_namespace TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(registry_name, from_namespace, target_registry, target_namespace)
+          )
+        `).catch(() => undefined);
+        const placeholders = chain.map(() => '?').join(', ');
+        const lookupRows = await db.all<{
+            target_registry: string;
+            target_namespace: string;
+        }>(
+            `
+          SELECT DISTINCT target_registry, target_namespace
+          FROM namespace_lookups
+          WHERE lower(registry_name) = lower(?)
+            AND from_namespace IN (${placeholders})
+        `,
+            [homeRegistry, ...chain]
+        );
+        for (const row of lookupRows) {
+            scopes.push({
+                registry: row.target_registry,
+                namespaces: [row.target_namespace],
+                publishedOnly: true,
+                source: 'lookup'
+            });
+        }
+    } else {
+        scopes.push({
+            registry: homeRegistry,
+            namespaces: query.namespace ? [query.namespace] : null,
+            publishedOnly: false,
+            source: 'local'
+        });
+        if (useLookup && !query.namespace) {
+            await db.run(`
+              CREATE TABLE IF NOT EXISTS namespace_lookups (
+                id TEXT PRIMARY KEY,
+                registry_name TEXT NOT NULL,
+                from_namespace TEXT NOT NULL,
+                target_registry TEXT NOT NULL,
+                target_namespace TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(registry_name, from_namespace, target_registry, target_namespace)
+              )
+            `).catch(() => undefined);
+            const lookupRows = await db.all<{
+                target_registry: string;
+                target_namespace: string;
+            }>(
+                `
+              SELECT DISTINCT target_registry, target_namespace
+              FROM namespace_lookups
+              WHERE lower(registry_name) = lower(?)
+            `,
+                [homeRegistry]
+            );
+            for (const row of lookupRows) {
+                scopes.push({
+                    registry: row.target_registry,
+                    namespaces: [row.target_namespace],
+                    publishedOnly: true,
+                    source: 'lookup'
+                });
+            }
+        }
     }
 
-    if (query.status) {
-        clauses.push('status = ?');
-        params.push(normalizeEnumValue(query.status, FACT_STATUSES, 'status'));
-    } else if (!query.include_inactive) {
-        clauses.push(query.include_review ? "status IN ('active', 'needs_review')" : "status = 'active'");
+    const allRows: Array<{ row: FactRow; source: 'local' | 'parent' | 'lookup' }> = [];
+    const seen = new Set<string>();
+
+    for (const scope of scopes) {
+        const clauses: string[] = ['registry_name = ?'];
+        const params: unknown[] = [scope.registry];
+
+        if (query.query) {
+            clauses.push(db.factSearchClause());
+            params.push(query.query);
+        }
+        if (scope.namespaces && scope.namespaces.length === 1) {
+            clauses.push('namespace = ?');
+            params.push(scope.namespaces[0]);
+        } else if (scope.namespaces && scope.namespaces.length > 1) {
+            clauses.push(`namespace IN (${scope.namespaces.map(() => '?').join(', ')})`);
+            params.push(...scope.namespaces);
+        }
+        if (query.subject) {
+            clauses.push('subject = ?');
+            params.push(query.subject);
+        }
+        if (query.scope) {
+            clauses.push('scope = ?');
+            params.push(query.scope);
+        }
+        if (query.fact_type) {
+            clauses.push('fact_type = ?');
+            params.push(normalizeEnumValue(query.fact_type, FACT_TYPES, 'fact_type'));
+        }
+        if (query.actionability) {
+            clauses.push('actionability = ?');
+            params.push(normalizeEnumValue(query.actionability, FACT_ACTIONABILITIES, 'actionability'));
+        }
+        if (scope.publishedOnly) {
+            clauses.push("registry_channel = 'published'");
+        } else if (query.registry_channel) {
+            clauses.push('registry_channel = ?');
+            params.push(normalizeEnumValue(query.registry_channel, FACT_REGISTRY_CHANNELS, 'registry_channel'));
+        } else if (query.local_agent) {
+            const placeholders = LOCAL_AGENT_CHANNELS.map(() => '?').join(', ');
+            clauses.push(`registry_channel IN (${placeholders})`);
+            params.push(...LOCAL_AGENT_CHANNELS);
+        } else if (query.published_only) {
+            clauses.push("registry_channel = 'published'");
+        }
+
+        if (query.status) {
+            clauses.push('status = ?');
+            params.push(normalizeEnumValue(query.status, FACT_STATUSES, 'status'));
+        } else if (!query.include_inactive) {
+            clauses.push(query.include_review ? "status IN ('active', 'needs_review')" : "status = 'active'");
+        }
+
+        const rows = await db.all<FactRow>(`
+          SELECT ${FACT_SELECT_COLUMNS}
+          FROM facts
+          WHERE ${clauses.join(' AND ')}
+          ORDER BY updated_at DESC
+        `, params);
+
+        for (const row of rows) {
+            const id = `${row.namespace}\0${row.key}`;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            allRows.push({ row, source: scope.source });
+        }
     }
 
-    const where = `WHERE ${clauses.join(' AND ')}`;
-    const rows = await db.all<FactRow>(`
-      SELECT ${FACT_SELECT_COLUMNS}
-      FROM facts
-      ${where}
-      ORDER BY updated_at DESC
-    `, params);
-
-    const ranked = rows
-        .map(row => rankFact(row, profile, query))
-        .filter((result): result is RelevantFactResult => result !== null)
-        .sort((a, b) => b.relevance.score - a.relevance.score)
-        .slice(0, clampLimit(query.limit));
+    const ranked: RelevantFactResult[] = [];
+    for (const { row, source } of allRows) {
+        const result = rankFact(row, profile, query);
+        if (!result) continue;
+        ranked.push({
+            ...result,
+            fact: {
+                ...result.fact,
+                lookup_source: source,
+                writable: source === 'local'
+            }
+        });
+    }
+    ranked.sort((a, b) => b.relevance.score - a.relevance.score);
+    const limited = ranked.slice(0, clampLimit(query.limit));
 
     return {
         profile,
-        results: ranked,
-        count: ranked.length
+        results: limited,
+        count: limited.length
     };
 }
 
@@ -1294,14 +1438,21 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
     const registryName = await resolveSyncRegistryName(config.person, config.apiKey);
 
     try {
-        const targetNamespaces = namespaces || ['company.decisions', 'company.constraints', 'company.branding'];
+        const targetNamespaces = namespaces || [
+            'company.guidelines',
+            'company.branding',
+            'company.decisions',
+            'company.constraints'
+        ];
         let pulled = 0;
         let skipped = 0;
         let conflicts = 0;
         const pulledFacts: FactResponse[] = [];
 
         for (const namespace of targetNamespaces) {
-            const response = await fetch(`${remoteUrl}/v1/facts/${namespace}?include_metadata=true&registry_channel=published`, {
+            const response = await fetch(
+                `${remoteUrl}/v1/registries/${encodeURIComponent(registryName)}/facts/${encodeURIComponent(namespace)}?include_metadata=true&registry_channel=published`,
+                {
                 headers: {
                     'X-API-Key': config.apiKey,
                     'Content-Type': 'application/json'
@@ -1453,6 +1604,11 @@ export async function pushFactsToRemote(selectors?: string[]): Promise<SyncPushR
 
     const registryName = await resolveSyncRegistryName(config.person, config.apiKey);
 
+    // Push only to the active/home registry — never to lookup-path parents.
+    if (config.person) {
+        await assertCanWriteRegistry(config.person, registryName);
+    }
+
     try {
         const keyRecord = await findApiKeyBySecret(config.apiKey);
         const ctx = await getPushCollaborationContext(config.person);
@@ -1518,7 +1674,7 @@ export async function pushFactsToRemote(selectors?: string[]): Promise<SyncPushR
                               };
 
                     const response = await fetch(
-                        `${remoteUrl}/v1/facts/${encodeURIComponent(fact.namespace)}/${encodeURIComponent(fact.key)}`,
+                        `${remoteUrl}/v1/registries/${encodeURIComponent(registryName)}/facts/${encodeURIComponent(fact.namespace)}/${encodeURIComponent(fact.key)}`,
                         {
                             method: 'PUT',
                             headers: {

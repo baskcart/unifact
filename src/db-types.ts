@@ -122,6 +122,13 @@ export interface RegistryRow {
     owner_person: string;
     description: string | null;
     git_url: string | null;
+    /** Parent registry for namespace lookup (read-only for child members). */
+    parent_registry: string | null;
+    /**
+     * org = discoverable + published facts lookable by any registry on this host.
+     * private = only members may look up / discover.
+     */
+    lookup_visibility: 'private' | 'org';
     created_at: number;
     updated_at: number;
 }

@@ -12,29 +12,42 @@ import {
 } from './keys.js';
 import {
     approveJoin,
+    assertCanWriteRegistry,
+    getPersonMembership,
     getRegistry,
     initRegistry,
     listJoinRequests,
+    listOrgPublicTargets,
+    listPublicNamespaces,
     listRegistries,
     requestJoin,
     resolveActiveRegistry,
+    setLookupVisibility,
+    setNamespaceVisibility,
     suspendJoin
 } from './registry.js';
+import {
+    addNamespaceLookup,
+    describeLookupResolution,
+    getFactWithLookup,
+    isExplicitLookupTargetRegistry,
+    listFactsWithLookup,
+    listNamespaceLookups,
+    listNamespacesWithLookup,
+    removeNamespaceLookup,
+    searchFactsWithLookup
+} from './lookup.js';
 import { listOpsEvents, trackOpsEvent, type OpsEventKind } from './ops.js';
 import type { ApiKeyRecord } from './keys.js';
 import {
     approveFact,
     deleteAgentProfile,
     deleteFact,
-    factFromRow,
     findRelevantFacts,
     getAgentProfileRow,
-    getFactRow,
     getRegistryMetadata,
     getSyncStatus,
     listAgentProfiles,
-    listFacts,
-    listFactNamespaces,
     listFactVersions,
     listReviewQueue,
     proposeFactFromProfile,
@@ -45,7 +58,6 @@ import {
     retractFact,
     rejectFact,
     reviewFact,
-    searchFacts,
     supersedeFact,
     upsertAgentProfile,
     upsertFact,
@@ -162,9 +174,127 @@ app.get('/v1/registries/:name', requireAuthOrBootstrap('read'), async (req: Requ
     try {
         const registry = await getRegistry(req.params.name);
         if (!registry) return res.status(404).json({ error: 'Registry not found' });
-        return res.json({ registry });
+        const lookups = await listNamespaceLookups(registry.name);
+        return res.json({ registry, lookups, count: lookups.length });
     } catch (err) {
         return handleError(res, err, 'Failed to load registry');
+    }
+});
+
+app.get('/v1/registries/:name/lookup', requireAuthOrBootstrap('read'), async (req: Request, res: Response) => {
+    try {
+        const registry = await getRegistry(req.params.name);
+        if (!registry) return res.status(404).json({ error: 'Registry not found' });
+        const namespace = getQueryString(req, 'namespace');
+        const description = await describeLookupResolution(registry.name, namespace);
+        return res.json({
+            ...description,
+            note: 'Parent namespaces are implicit. Explicit lookups are read-only (published facts only).'
+        });
+    } catch (err) {
+        return handleError(res, err, 'Failed to load lookup paths');
+    }
+});
+
+app.post('/v1/registries/:name/lookup', requireAuth('write'), async (req: Request, res: Response) => {
+    try {
+        const body = bodyAsRecord(req);
+        const from = String(body.from_namespace || body.from || '');
+        const target = String(body.target || body.to || '');
+        if (!from || !target) {
+            return res.status(400).json({
+                error: 'from_namespace and target are required (target = namespace or Registry/namespace)'
+            });
+        }
+        const secret = getApiKey(req);
+        const keyRecord = secret ? await findApiKeyBySecret(secret) : undefined;
+        const entry = await addNamespaceLookup({
+            registry: req.params.name,
+            from_namespace: from,
+            target,
+            person: keyRecord?.person
+        });
+        return res.json({ success: true, lookup: entry });
+    } catch (err) {
+        return handleError(res, err, 'Failed to add lookup');
+    }
+});
+
+app.delete('/v1/registries/:name/lookup', requireAuth('write'), async (req: Request, res: Response) => {
+    try {
+        const body = bodyAsRecord(req);
+        const from =
+            String(body.from_namespace || body.from || getQueryString(req, 'from_namespace') || '');
+        const target = String(body.target || body.to || getQueryString(req, 'target') || '');
+        if (!from || !target) {
+            return res.status(400).json({ error: 'from_namespace and target are required' });
+        }
+        const removed = await removeNamespaceLookup({
+            registry: req.params.name,
+            from_namespace: from,
+            target
+        });
+        if (!removed) return res.status(404).json({ error: 'Lookup not found' });
+        return res.json({ success: true });
+    } catch (err) {
+        return handleError(res, err, 'Failed to remove lookup');
+    }
+});
+
+app.get('/v1/discover', requireAuthOrBootstrap('read'), async (_req: Request, res: Response) => {
+    try {
+        const targets = await listOrgPublicTargets();
+        return res.json({
+            targets,
+            count: targets.length,
+            note: 'Org-public targets: published facts in these registries/namespaces may be looked up (read-only) from any registry on this host.'
+        });
+    } catch (err) {
+        return handleError(res, err, 'Failed to discover targets');
+    }
+});
+
+app.put('/v1/registries/:name/visibility', requireAuth('write'), async (req: Request, res: Response) => {
+    try {
+        const body = bodyAsRecord(req);
+        const secret = getApiKey(req);
+        const keyRecord = secret ? await findApiKeyBySecret(secret) : undefined;
+        if (!keyRecord?.person) {
+            return res.status(401).json({ error: 'API key required' });
+        }
+        const raw = String(body.lookup_visibility || body.visibility || 'private').toLowerCase();
+        const visibility = raw === 'org' || raw === 'public' ? 'org' : 'private';
+
+        // Per-namespace publishing (preferred): body.namespace present.
+        const namespace = typeof body.namespace === 'string' ? body.namespace.trim() : '';
+        if (namespace) {
+            const namespaces = await setNamespaceVisibility({
+                registry: req.params.name,
+                namespace,
+                visibility,
+                set_by: keyRecord.person
+            });
+            return res.json({ success: true, registry: req.params.name, public_namespaces: namespaces });
+        }
+
+        // Whole-registry visibility (coarse).
+        const registry = await setLookupVisibility({
+            registry: req.params.name,
+            visibility,
+            set_by: keyRecord.person
+        });
+        return res.json({ success: true, registry });
+    } catch (err) {
+        return handleError(res, err, 'Failed to set lookup visibility');
+    }
+});
+
+app.get('/v1/registries/:name/public', requireAuth('read'), async (req: Request, res: Response) => {
+    try {
+        const namespaces = await listPublicNamespaces(req.params.name);
+        return res.json({ registry: req.params.name, public_namespaces: namespaces, count: namespaces.length });
+    } catch (err) {
+        return handleError(res, err, 'Failed to list public namespaces');
     }
 });
 
@@ -176,6 +306,8 @@ app.post('/v1/registries', allowPublicOrgCreate(), async (req: Request, res: Res
             person: String(body.person || ''),
             description: typeof body.description === 'string' ? body.description : undefined,
             git_url: typeof body.git_url === 'string' ? body.git_url : undefined,
+            parent_registry:
+                typeof body.parent_registry === 'string' ? body.parent_registry : undefined,
             api_key: typeof body.api_key === 'string' ? body.api_key : undefined,
             // Origin must not recurse into its own upstream when mirroring.
             syncRemote: false
@@ -276,32 +408,64 @@ function apiKeyCanCrossRegistryOps(key: ApiKeyRecord | undefined): boolean {
 }
 
 /**
- * Resolve org registry from API key. Optional query/body registry_name must match (no cross-tenant).
+ * Resolve org registry for fact/sync ops.
+ * Priority: URL path (/v1/registries/:registryName/…) → query/body registry_name → key default.
+ * Authorize by membership (or platform wildcard key), not by a single key.registry_name binding.
  */
 async function resolveRequestRegistry(req: Request): Promise<string> {
     const secret = getApiKey(req);
     const keyRecord = secret ? await findApiKeyBySecret(secret) : undefined;
-    let registryName = keyRecord?.registry_name?.trim() || null;
-    if (!registryName && keyRecord?.person) {
-        registryName = await resolveActiveRegistry(keyRecord.person);
-    }
-    if (!registryName) {
-        const err = new Error('API key has no registry_name');
-        (err as Error & { status?: number }).status = 400;
-        throw err;
-    }
 
+    const pathRegistry =
+        typeof req.params.registryName === 'string' ? req.params.registryName.trim() : undefined;
     const bodyReg =
         req.body && typeof req.body === 'object' && !Array.isArray(req.body)
             ? (req.body as Record<string, unknown>).registry_name
             : undefined;
     const requested =
+        pathRegistry ??
         getQueryString(req, 'registry_name') ??
-        (typeof bodyReg === 'string' ? bodyReg : undefined);
-    if (requested && requested !== registryName) {
-        const err = new Error(`registry_name must match API key registry '${registryName}'`);
+        (typeof bodyReg === 'string' ? bodyReg.trim() : undefined);
+
+    let defaultRegistry = keyRecord?.registry_name?.trim() || null;
+    if (!defaultRegistry && keyRecord?.person) {
+        defaultRegistry = await resolveActiveRegistry(keyRecord.person);
+    }
+
+    const registryName = requested || defaultRegistry;
+    if (!registryName) {
+        const err = new Error(
+            'No registry specified. Use /v1/registries/<name>/facts/… or set active registry (uni init / uni join).'
+        );
         (err as Error & { status?: number }).status = 400;
         throw err;
+    }
+
+    if (keyRecord && !apiKeyCanCrossRegistryOps(keyRecord)) {
+        const membership = await getPersonMembership(keyRecord.person, registryName);
+        if (!membership) {
+            let defaultRegistry = keyRecord.registry_name?.trim() || null;
+            if (!defaultRegistry) {
+                defaultRegistry = await resolveActiveRegistry(keyRecord.person);
+            }
+            if (
+                defaultRegistry &&
+                (await isExplicitLookupTargetRegistry(defaultRegistry, registryName).catch(() => false))
+            ) {
+                const err = new Error(
+                    `Registry '${registryName}' is reachable only via namespace lookup (read-only). ` +
+                        `Members of '${defaultRegistry}' can read published facts there but cannot write or push. ` +
+                        `Join '${registryName}' to contribute, or promote a fact into a writable namespace.`
+                );
+                (err as Error & { status?: number }).status = 403;
+                throw err;
+            }
+            const err = new Error(
+                `Not a member of registry '${registryName}'. Join first: uni join ${registryName}`
+            );
+            (err as Error & { status?: number }).status = 403;
+            throw err;
+        }
     }
 
     return registryName;
@@ -478,7 +642,8 @@ app.get('/v1/agent-profiles/:id/relevant-facts', requireAuth('read'), async (req
             limit: getQueryNumber(req, 'limit'),
             query: getQueryString(req, 'q'),
             registry_channel: getQueryString(req, 'registry_channel'),
-            published_only: getQueryBoolean(req, 'published_only')
+            published_only: getQueryBoolean(req, 'published_only'),
+            lookup: getQueryBoolean(req, 'lookup')
         });
 
         const results = await filterAuthorized(
@@ -570,6 +735,22 @@ app.delete('/v1/agent-profiles/:id', requireAuth('write'), async (req: Request, 
     }
 });
 
+/**
+ * Rewrite /v1/registries/:registryName/{facts|audit|sync}/… → /v1/{facts|audit|sync}/…
+ * so registry is explicit in the URL while handlers stay shared.
+ */
+app.use((req, _res, next) => {
+    const match = req.path.match(/^\/v1\/registries\/([^/]+)\/(facts|audit|sync)(\/.*)?$/);
+    if (!match) return next();
+    const registryName = decodeURIComponent(match[1]);
+    const section = match[2];
+    const rest = match[3] || '';
+    req.params = { ...req.params, registryName };
+    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    req.url = `/v1/${section}${rest}${qs}`;
+    return next();
+});
+
 app.get('/v1/facts/_search', requireAuth('read'), async (req: Request, res: Response) => {
     const query = req.query.q as string | undefined;
     const format = getFormat(req);
@@ -581,18 +762,20 @@ app.get('/v1/facts/_search', requireAuth('read'), async (req: Request, res: Resp
 
     try {
         const registry = await resolveRequestRegistry(req);
-        const matches = await searchFacts(registry, query);
-        const authorizedMatches = await filterAuthorized(matches, apiKey, match => match.namespace);
-        const facts = authorizedMatches.map(factFromRow);
+        const useLookup = getQueryBoolean(req, 'lookup') !== false;
+        const facts = await searchFactsWithLookup(registry, query, { lookup: useLookup });
+        const authorizedMatches = await filterAuthorized(facts, apiKey, match => match.namespace);
 
         if (format === 'json') {
             return res.json({
-                results: facts,
-                count: facts.length
+                registry,
+                lookup: useLookup,
+                results: authorizedMatches,
+                count: authorizedMatches.length
             });
         }
 
-        return sendFormatted(res, facts, format);
+        return sendFormatted(res, authorizedMatches, format);
     } catch (err) {
         console.error(err);
         return res.status(500).json({ error: 'Search execution failed' });
@@ -619,7 +802,8 @@ app.get('/v1/facts/_relevant', requireAuth('read'), async (req: Request, res: Re
             limit: getQueryNumber(req, 'limit'),
             query: getQueryString(req, 'q'),
             registry_channel: getQueryString(req, 'registry_channel'),
-            published_only: getQueryBoolean(req, 'published_only')
+            published_only: getQueryBoolean(req, 'published_only'),
+            lookup: getQueryBoolean(req, 'lookup')
         });
 
         const results = await filterAuthorized(
@@ -657,19 +841,22 @@ app.get('/v1/facts/_review-queue', requireAuth('read'), async (req: Request, res
     }
 });
 
-/** Distinct namespaces with facts in the caller's org registry. */
+/** Distinct namespaces with facts in the caller's org registry (plus parent lookup). */
 app.get('/v1/facts/_namespaces', requireAuth('read'), async (req: Request, res: Response) => {
     const apiKey = getApiKey(req);
     try {
         const registry = await resolveRequestRegistry(req);
-        const namespaces = await listFactNamespaces(registry);
+        const useLookup = getQueryBoolean(req, 'lookup') !== false;
+        const namespaces = await listNamespacesWithLookup(registry, { lookup: useLookup });
         const allowed = await filterAuthorized(
             namespaces.map(namespace => ({ namespace })),
             apiKey,
             row => row.namespace
         );
+        const lookups = useLookup ? await listNamespaceLookups(registry) : [];
         return res.json({
             registry,
+            lookups,
             namespaces: allowed.map(row => row.namespace),
             count: allowed.length
         });
@@ -880,14 +1067,14 @@ app.get('/v1/facts/:namespace/:key', requireAuth('read'), async (req: Request, r
 
     try {
         const registry = await resolveRequestRegistry(req);
-        const row = await getFactRow(registry, namespace, key);
-        if (!row) {
+        const useLookup = getQueryBoolean(req, 'lookup') !== false;
+        const fact = await getFactWithLookup(registry, namespace, key, { lookup: useLookup });
+        if (!fact) {
             return res.status(404).json({ error: `Fact '${key}' not found in namespace '${namespace}'` });
         }
 
-        const fact = factFromRow(row);
         if (format === 'json') {
-            return res.json({ fact });
+            return res.json({ fact, lookup: useLookup });
         }
 
         return sendFormatted(res, [fact], format);
@@ -903,14 +1090,15 @@ app.get('/v1/facts/:namespace', requireAuth('read'), async (req: Request, res: R
 
     try {
         const registry = await resolveRequestRegistry(req);
+        const useLookup = getQueryBoolean(req, 'lookup') !== false;
         const registryChannel = getQueryString(req, 'registry_channel');
-        const rows = registryChannel
-            ? (await listFacts(registry, namespace)).filter(row => row.registry_channel === registryChannel)
-            : await listFacts(registry, namespace);
-        const facts = rows.map(factFromRow);
+        let facts = await listFactsWithLookup(registry, namespace, { lookup: useLookup });
+        if (registryChannel) {
+            facts = facts.filter(fact => fact.registry_channel === registryChannel);
+        }
 
         if (format === 'json' && wantsMetadata(req)) {
-            return res.json({ namespace, facts, count: facts.length });
+            return res.json({ namespace, registry, lookup: useLookup, facts, count: facts.length });
         }
 
         return sendFormatted(res, facts, format);
@@ -937,12 +1125,15 @@ app.post('/v1/facts/_batch', async (req: Request, res: Response) => {
 
     try {
         const registry = await resolveRequestRegistry(req);
+        const useLookup = getQueryBoolean(req, 'lookup') !== false;
         const facts = (await Promise.all(
-            namespaces.map(async namespace => (await listFacts(registry, String(namespace))).map(factFromRow))
+            namespaces.map(async namespace =>
+                listFactsWithLookup(registry, String(namespace), { lookup: useLookup })
+            )
         )).flat();
 
         if (format === 'json' && wantsMetadata(req)) {
-            return res.json({ facts, count: facts.length });
+            return res.json({ facts, count: facts.length, registry, lookup: useLookup });
         }
 
         return sendFormatted(res, facts, format);
@@ -957,6 +1148,11 @@ const createOrUpdateFact = async (req: Request, res: Response) => {
 
     try {
         const registry = await resolveRequestRegistry(req);
+        const secret = getApiKey(req);
+        const keyRecord = secret ? await findApiKeyBySecret(secret) : undefined;
+        if (keyRecord?.person) {
+            await assertCanWriteRegistry(keyRecord.person, registry);
+        }
         const result = await upsertFact(registry, namespace, key, bodyAsRecord(req));
         console.log(`[unifact] ${result.action}: ${namespace}/${key}`);
         return res.json(result);

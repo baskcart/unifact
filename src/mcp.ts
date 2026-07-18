@@ -6,6 +6,12 @@ import { db, AuditLogRow } from './db.js';
 import { getActiveLocalApiKey } from './keys.js';
 import { getPersonMembership, requireWorkingRegistry } from './registry.js';
 import {
+    getFactWithLookup,
+    listFactsWithLookup,
+    listNamespaceLookups,
+    searchFactsWithLookup
+} from './lookup.js';
+import {
     approveFact,
     deleteAgentProfile,
     deleteFact,
@@ -16,7 +22,6 @@ import {
     getRegistryMetadata,
     getSyncStatus,
     listAgentProfiles,
-    listFacts,
     listFactVersions,
     listReviewQueue,
     proposeFactFromProfile,
@@ -27,7 +32,6 @@ import {
     retractFact,
     rejectFact,
     reviewFact,
-    searchFacts,
     supersedeFact,
     upsertAgentProfile,
     upsertFact,
@@ -183,18 +187,25 @@ server.registerTool('registry_metadata', {
 });
 
 server.registerTool('list_facts', {
-    description: 'List all facts in a namespace with full metadata',
+    description:
+        'List facts in a namespace. Resolves local → parent namespaces (implicit dotted hierarchy) → explicit lookups (published, read-only).',
     inputSchema: {
         namespace: z.string().min(1).describe('Namespace to list, for example company.decisions'),
+        lookup: z
+            .boolean()
+            .optional()
+            .describe('Include parent namespaces and explicit lookups (default true).'),
         ...optionalRegistryField
     }
-}, async ({ namespace, registry: registryArg }) => {
+}, async ({ namespace, registry: registryArg, lookup }) => {
     try {
         const registry = await resolveToolRegistry(registryArg);
-        const facts = (await listFacts(registry, namespace)).map(factFromRow);
+        const facts = await listFactsWithLookup(registry, namespace, { lookup: lookup !== false });
+        const lookups = lookup === false ? [] : await listNamespaceLookups(registry, namespace);
         return toolResult({
             registry,
             namespace,
+            lookups,
             facts,
             count: facts.length
         });
@@ -204,41 +215,44 @@ server.registerTool('list_facts', {
 });
 
 server.registerTool('get_fact', {
-    description: 'Get one fact by namespace and key with full metadata',
+    description:
+        'Get one fact by namespace and key. Resolves local → parent namespaces → explicit lookups. Parent/lookup hits have writable: false.',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
+        lookup: z.boolean().optional().describe('Include parent namespaces and explicit lookups (default true)'),
         ...optionalRegistryField
     }
-}, async ({ namespace, key, registry: registryArg }) => {
+}, async ({ namespace, key, registry: registryArg, lookup }) => {
     try {
         const registry = await resolveToolRegistry(registryArg);
-        const row = await getFactRow(registry, namespace, key);
+        const fact = await getFactWithLookup(registry, namespace, key, { lookup: lookup !== false });
 
-        if (!row) {
+        if (!fact) {
             return errorResult(`Fact '${key}' not found in namespace '${namespace}'`);
         }
 
-        return toolResult({
-            fact: factFromRow(row)
-        });
+        return toolResult({ fact });
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
 });
 
 server.registerTool('search_facts', {
-    description: 'Search facts (SQLite FTS5 locally; PostgreSQL plainto_tsquery on staging)',
+    description:
+        'Search facts in the home registry and explicit lookup targets (published). Parent hierarchy is namespace-scoped at get/list time.',
     inputSchema: {
         query: z.string().min(1).describe('Full-text search query'),
+        lookup: z.boolean().optional().describe('Include explicit lookup targets (default true)'),
         ...optionalRegistryField
     }
-}, async ({ query, registry: registryArg }) => {
+}, async ({ query, registry: registryArg, lookup }) => {
     try {
         const registry = await resolveToolRegistry(registryArg);
-        const facts = (await searchFacts(registry, query)).map(factFromRow);
+        const facts = await searchFactsWithLookup(registry, query, { lookup: lookup !== false });
         return toolResult({
             query,
+            registry,
             facts,
             count: facts.length
         });

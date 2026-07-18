@@ -8,13 +8,70 @@ Source control for organizational facts — one governed truth **per organizatio
 
 | Git | UniFact |
 |-----|---------|
-| Host / org | Host (`staging.unifact.ai`) + **registry** named by org (e.g. `Unifact`) |
+| Host / org | Host (`staging.unifact.ai`) + **registry** (e.g. `Unifact`, `Baskcart`) |
 | `git init` | `uni init Unifact` — you become owner |
 | Join + access | `uni join` → owner `uni approve` / `uni suspend` |
-| `pull` / `push` | `uni pull` / `uni push` |
+| `pull` / `push` | `uni pull` / `uni push` (home registry only) |
 | Branches / PRs | Channels: proposed → review / feedback → **published** |
+| Folders in repo | **Namespaces** (dotted hierarchy, e.g. `company.constraints`) |
 
-Each org has its own facts. You only see registries you own or belong to.
+**Registry** = tenancy / membership / who may write.  
+**Namespace** = topic folder inside a registry. Names must not collide (a name cannot be both).
+
+### When to create which
+
+| Create a **registry** when… | Create a **namespace** when… |
+|-----------------------------|------------------------------|
+| Separate join/approve boundary | Same members group topics |
+| Separate write/push tenancy | Dotted hierarchy is enough (`sales.policy`) |
+
+### Lookup & org-public
+
+- **Parent namespaces** are implicit (`sales.west` → `sales`).
+- **Lookup** is an explicit read path: `uni lookup add <from-ns> <target>` (published, read-only).
+- **Org-public** is set per **namespace** (`uni public company.guidelines`): any registry on the host may discover it and look up its published facts — not internet-public. Descendant namespaces are included.
+- Discover: `uni discover`. Example: `uni lookup add my.area Unifact/company.guidelines`.
+- Coarse option: `uni public --registry` exposes **every** published fact in the registry; prefer per-namespace so internal namespaces (e.g. `company.infrastructure`) stay private.
+
+The seeded **Unifact** registry publishes `company.guidelines` and `company.branding` as org-public so agents on other registries can follow the same basics (registry vs namespace, membership, lookup). Its `company.decisions`, `company.constraints`, and `company.infrastructure` namespaces stay private.
+
+Each registry’s private facts stay private. You only **write** registries you belong to.
+
+### How lookup & inheritance resolve
+
+When an agent asks for a fact from a namespace, UniFact resolves it in three ordered steps — the **home namespace** (any channel), then **parent namespaces** up the dotted hierarchy (published only), then any **explicit lookups** (published, read-only). The first hit wins.
+
+```mermaid
+flowchart TD
+    A["Agent asks for a fact<br/>in baskcart.sales.west"] --> H
+
+    subgraph HOME["Home registry: Baskcart (writable)"]
+        direction TB
+        H["1 - Home namespace<br/>baskcart.sales.west<br/><i>any channel; local writes win</i>"]
+        P1["2 - Parent namespace<br/>baskcart.sales<br/><i>published only</i>"]
+        P2["2 - Parent namespace<br/>baskcart<br/><i>published only</i>"]
+        H -->|miss| P1 -->|miss| P2
+    end
+
+    subgraph LOOKUP["Explicit lookup - read-only"]
+        direction TB
+        L["3 - Lookup target<br/>Unifact/company.guidelines<br/><i>published only, cannot write/push</i>"]
+    end
+
+    P2 -->|miss| L
+    L -->|miss| X["Not found"]
+
+    classDef home fill:#e3f2fd,stroke:#1976d2,color:#0d47a1;
+    classDef lookup fill:#f3e5f5,stroke:#8e24aa,color:#4a148c;
+    classDef miss fill:#fafafa,stroke:#bdbdbd,color:#616161;
+    class H,P1,P2 home;
+    class L lookup;
+    class X miss;
+```
+
+- **Parent namespaces** are *implicit* — no registration, just the dotted name (`a.b.c` → `a.b` → `a`).
+- **Lookups** are *explicit and cross-registry* — added with `uni lookup add`, gated by org-public visibility or membership, and never grant write/push.
+- Only **published** facts are visible via parent/lookup; your own namespace sees every channel.
 
 ## Quick start
 
@@ -43,6 +100,10 @@ uni facts
 uni publish policy/return_window
 uni push
 uni pull
+
+# Platform guidelines (org-public Unifact)
+uni discover
+uni lookup add policy Unifact/company.guidelines
 ```
 
 Plain-language guide: [`docs/user-guide.html`](docs/user-guide.html)
@@ -55,6 +116,8 @@ uni status
 uni facts [Registry]
 uni team [Registry]
 uni init <Registry> | join <Registry> | approve | suspend
+uni public <namespace> | public off <namespace> | public --registry | discover
+uni lookup | lookup add <from> <target> | lookup remove …
 uni add "<value>"
 uni extract <file.md> [--dry-run]   # → proposed only
 uni publish <namespace/key> | feedback <namespace/key>

@@ -24,6 +24,7 @@
     "start": "tsx src/api.ts",
     "seed": "tsx src/seed.ts",
     "build": "tsc",
+    "test": "tsx --test src/**/*.test.ts",
     "mcp": "tsx src/mcp.ts",
     "cli": "tsx src/cli.ts",
     "uni": "tsx src/cli.ts"

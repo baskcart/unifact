@@ -302,6 +302,8 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
         owner_person TEXT NOT NULL,
         description TEXT,
         git_url TEXT,
+        parent_registry TEXT,
+        lookup_visibility TEXT NOT NULL DEFAULT 'private',
         created_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL
       );
@@ -332,6 +334,26 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
         UNIQUE(registry_name, kind, event_code)
       );
 
+      CREATE TABLE IF NOT EXISTS namespace_lookups (
+        id TEXT PRIMARY KEY,
+        registry_name TEXT NOT NULL,
+        from_namespace TEXT NOT NULL,
+        target_registry TEXT NOT NULL,
+        target_namespace TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        UNIQUE(registry_name, from_namespace, target_registry, target_namespace)
+      );
+
+      CREATE TABLE IF NOT EXISTS public_namespaces (
+        id TEXT PRIMARY KEY,
+        registry_name TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        UNIQUE(registry_name, namespace)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace);
       CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(fact_type);
       CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
@@ -354,6 +376,14 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
 
     await pool.query(`
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS registry_name TEXT
+    `).catch(() => undefined);
+
+    await pool.query(`
+      ALTER TABLE registries ADD COLUMN IF NOT EXISTS parent_registry TEXT
+    `).catch(() => undefined);
+
+    await pool.query(`
+      ALTER TABLE registries ADD COLUMN IF NOT EXISTS lookup_visibility TEXT DEFAULT 'private'
     `).catch(() => undefined);
 
     // Must run before indexes that reference facts.registry_name (existing DBs lack the column).

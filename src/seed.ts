@@ -1,5 +1,5 @@
 import { upsertAgentProfile, upsertFact } from './store.js';
-import { getRegistry, initRegistry, requireWorkingRegistry } from './registry.js';
+import { getRegistry, initRegistry, requireWorkingRegistry, setNamespaceVisibility } from './registry.js';
 import { getActiveLocalApiKey } from './keys.js';
 
 interface SeedFact extends Record<string, unknown> {
@@ -161,7 +161,7 @@ const SEED_FACTS: SeedFact[] = [
         created_by: 'seed'
     },
     {
-        namespace: 'company.decisions',
+        namespace: 'company.guidelines',
         key: 'unifact-registry-lifecycle',
         value: 'Facts move from working/proposed/review channels into a published central registry, and agents pull published facts relevant to their operations.',
         description: 'Unifact is a DB-backed fact registry with Git-like lifecycle semantics: propose, review, publish, supersede, retract, history, and pull.',
@@ -225,7 +225,7 @@ const SEED_FACTS: SeedFact[] = [
         created_by: 'seed'
     },
     {
-        namespace: 'company.constraints',
+        namespace: 'company.guidelines',
         key: 'work_session_fact_check',
         value: 'Work agents (Cursor, Codex, Claude, Devin, Antigravity, Cowork, and similar) must run a Fact Check via UniFact MCP before work that depends on org truth.',
         description: 'Before changing systems or asserting procedure, retrieve relevant decision, constraint, architecture, naming, and product facts so work does not contradict published registry truth.',
@@ -241,7 +241,7 @@ const SEED_FACTS: SeedFact[] = [
         created_by: 'seed'
     },
     {
-        namespace: 'company.constraints',
+        namespace: 'company.guidelines',
         key: 'work_agent_mcp_interface',
         value: 'UniFact MCP is the shared interface for all work agents to read and propose org facts; do not treat README or source exploration as the default source of org truth.',
         description: 'Configure MCP from docs/mcp.md. Same stdio server for Cursor, Claude, Codex, Devin, Antigravity, and other MCP hosts.',
@@ -257,7 +257,7 @@ const SEED_FACTS: SeedFact[] = [
         created_by: 'seed'
     },
     {
-        namespace: 'company.constraints',
+        namespace: 'company.guidelines',
         key: 'work_session_git_pull',
         value: 'Work agents must run git pull before starting repository code changes.',
         description: 'Before editing code, sync the current branch from its configured upstream. If no upstream is configured, record that pull was attempted and why it could not complete.',
@@ -284,6 +284,168 @@ const SEED_FACTS: SeedFact[] = [
         actionability: 'decision_record',
         audience: ['general-agent', 'builder-agent', 'coding-agent', 'operations-agent'],
         relevance_tags: ['staging', 'review', 'tenant-isolation', 'upstream-registry'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.guidelines',
+        key: 'registry-lookup-path',
+        value:
+            'Agents resolve facts as: exact namespace, then parent namespaces from the dotted hierarchy (implicit), then explicit namespace lookups (published, read-only).',
+        description:
+            'Parent namespaces need no registration. Explicit lookups are one-time: uni lookup add <from-ns> <target>. Lookups never grant write or push.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'architecture',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'coding-agent', 'operations-agent'],
+        relevance_tags: ['lookup', 'parent-namespace', 'read-only', 'hierarchy'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.guidelines',
+        key: 'lookup-path-read-only',
+        value:
+            'Explicit namespace lookups are read-only. Parent namespace hierarchy is implicit. Writes and push target the home registry namespace only.',
+        description:
+            'Register with uni lookup add. Removing uses uni lookup remove. Membership is required to write a registry; lookup alone is not enough.',
+        fact_type: 'constraint_fact',
+        subject: 'unifact',
+        scope: 'authorization',
+        derivation: 'asserted',
+        actionability: 'constraint',
+        audience: ['work-agent', 'builder-agent', 'operations-agent'],
+        relevance_tags: ['lookup', 'authorization', 'push', 'parent-namespace'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.guidelines',
+        key: 'registry-namespace-name-uniqueness',
+        value:
+            'Registry names and namespace names share one identity space. A name cannot be both a registry and a namespace (or the top-level segment of a namespace).',
+        description:
+            'Creating a registry fails if that name (or name.*) already exists as a namespace. Creating a namespace fails if its full path or top-level segment matches an existing registry. Same rule as unique registry names.',
+        fact_type: 'constraint_fact',
+        subject: 'unifact',
+        scope: 'naming',
+        derivation: 'asserted',
+        actionability: 'constraint',
+        audience: ['work-agent', 'builder-agent', 'operations-agent'],
+        relevance_tags: ['registry', 'namespace', 'naming', 'uniqueness'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.guidelines',
+        key: 'when-to-create-registry',
+        value:
+            'Create a registry when you need a separate membership boundary: its own owners, join/approve, API keys, and push/publish tenancy. Use a registry for a business unit, product, or team that must control who can write.',
+        description:
+            'Examples: Baskcart vs Unifact; Acme/HR vs Acme/Sales when each has its own members. Do not create a registry merely to group related facts — that is a namespace. Prefer one registry per tenancy boundary, not per topic.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'architecture',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'operations-agent'],
+        relevance_tags: ['registry', 'guidelines', 'tenancy', 'membership'],
+        priority: 'high',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.guidelines',
+        key: 'when-to-create-namespace',
+        value:
+            'Create a namespace to group topics inside a registry: policy, product areas, departments as folders — not as separate membership. Prefer dotted hierarchy (sales.west.policy) under one registry when the same people write.',
+        description:
+            'Examples: company.constraints, partyho.playback_host, sales.policy. Parent namespaces are implicit. Do not name a namespace after an existing registry (or use that registry’s name as the first segment).',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'architecture',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'operations-agent'],
+        relevance_tags: ['namespace', 'guidelines', 'hierarchy', 'topics'],
+        priority: 'high',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.guidelines',
+        key: 'registry-vs-namespace',
+        value:
+            'Registry = whose facts and who may write (tenancy). Namespace = which topic folder inside a registry. They are not interchangeable; their names must not collide.',
+        description:
+            'Scenario A: one registry + hierarchical namespaces. Scenario B: hierarchical registries with shallow namespaces. Scenario C: both — registries for membership, namespaces for topics; cross-read via org-public lookup.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'architecture',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'coding-agent', 'operations-agent'],
+        relevance_tags: ['registry', 'namespace', 'guidelines', 'architecture'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.guidelines',
+        key: 'org-public-registry',
+        value:
+            'Org-public means discoverable and lookable by any registry on the same UniFact host — not internet-public. Publish a curated namespace (uni public company.guidelines) so only shareable topics are exposed; keep decisions, constraints and infrastructure private.',
+        description:
+            'Owner: uni public <namespace> (preferred) or uni public --registry (coarse — exposes every published fact). Discover: uni discover. Others: uni lookup add <local-ns> Registry/namespace.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'architecture',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'operations-agent'],
+        relevance_tags: ['public', 'discover', 'lookup', 'org'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.guidelines',
+        key: 'unifact-platform-registry-public',
+        value:
+            'The Unifact platform registry publishes company.guidelines and company.branding as org-public so every registry on the host can look up shared basics: registries vs namespaces, membership, lookup, and naming rules. company.decisions, company.constraints and company.infrastructure stay private.',
+        description:
+            'Seed publishes those namespaces automatically. Other registries: uni lookup add <local-ns> Unifact/company.guidelines. Do not publish company.decisions, company.constraints or company.infrastructure.',
+        fact_type: 'decision_fact',
+        subject: 'unifact',
+        scope: 'platform',
+        derivation: 'asserted',
+        actionability: 'decision_record',
+        audience: ['general-agent', 'builder-agent', 'work-agent', 'operations-agent'],
+        relevance_tags: ['unifact', 'public', 'platform', 'guidelines'],
+        priority: 'critical',
+        approval_status: 'approved',
+        created_by: 'seed'
+    },
+    {
+        namespace: 'company.guidelines',
+        key: 'membership-for-write',
+        value:
+            'Write and push require membership in the target registry. Org-public lookup grants read of published facts only — never write, push, approve, or publish on the target.',
+        description:
+            'Join + approve for write access. Lookup add for read path. Do not treat discover/lookup as join.',
+        fact_type: 'constraint_fact',
+        subject: 'unifact',
+        scope: 'authorization',
+        derivation: 'asserted',
+        actionability: 'constraint',
+        audience: ['work-agent', 'builder-agent', 'operations-agent'],
+        relevance_tags: ['membership', 'write', 'lookup', 'push'],
         priority: 'critical',
         approval_status: 'approved',
         created_by: 'seed'
@@ -680,24 +842,55 @@ const SEED_AGENT_PROFILES: SeedAgentProfile[] = [
 async function runSeed() {
     console.log('Seeding UniFact baseline facts and agent profiles...');
 
-    let registryName: string;
+    const activeKey = await getActiveLocalApiKey();
+    let requestedRegistry: string | null = null;
     try {
-        registryName = await requireWorkingRegistry((await getActiveLocalApiKey())?.person ?? null);
+        requestedRegistry = await requireWorkingRegistry(activeKey?.person ?? null);
     } catch {
-        const existing = await getRegistry('Unifact');
-        if (existing) {
-            registryName = existing.name;
-        } else {
-            const person = (await getActiveLocalApiKey())?.person ?? 'seed';
-            const created = await initRegistry({
-                name: 'Unifact',
-                person,
-                description: 'Default seed registry',
-                syncRemote: false
+        requestedRegistry = 'Unifact';
+    }
+
+    const existing =
+        (requestedRegistry ? await getRegistry(requestedRegistry) : undefined) ||
+        (await getRegistry('Unifact'));
+    let registryName: string;
+    if (existing) {
+        registryName = existing.name;
+    } else {
+        const created = await initRegistry({
+            name: requestedRegistry || 'Unifact',
+            person: activeKey?.person ?? 'seed',
+            description: 'Default seed registry',
+            syncRemote: false
+        });
+        registryName = created.registry.name;
+        console.log(`Initialized registry '${registryName}' for seeding`);
+    }
+
+    // Publish ONLY the curated guideline namespace org-public — the registry itself
+    // stays private so decisions, constraints and infrastructure facts are never exposed.
+    const PUBLIC_NAMESPACES = ['company.guidelines', 'company.branding'];
+    try {
+        const owner =
+            (await getRegistry(registryName))?.owner_person ||
+            (await getActiveLocalApiKey())?.person ||
+            'seed';
+        for (const namespace of PUBLIC_NAMESPACES) {
+            await setNamespaceVisibility({
+                registry: registryName,
+                namespace,
+                visibility: 'org',
+                set_by: owner
             });
-            registryName = created.registry.name;
-            console.log(`Initialized registry '${registryName}' for seeding`);
         }
+        console.log(
+            `Registry '${registryName}' published namespaces org-public: ${PUBLIC_NAMESPACES.join(', ')}`
+        );
+        console.log(`  company.decisions, company.constraints, company.infrastructure remain private (members only).`);
+    } catch (err) {
+        console.warn(
+            `Could not publish namespaces for '${registryName}': ${err instanceof Error ? err.message : String(err)}`
+        );
     }
 
     for (const item of SEED_FACTS) {

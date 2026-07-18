@@ -17,14 +17,24 @@ import {
     focusRegistry,
     getTeam,
     initRegistry,
+    listOrgPublicTargets,
+    listPublicNamespaces,
     listRegistriesForPerson,
     parseJoinTarget,
     requestJoin,
     requireWorkingRegistry,
     resolveActiveRegistry,
+    setLookupVisibility,
+    setNamespaceVisibility,
     suspendJoin,
     type PersonRegistryMembership
 } from './registry.js';
+import {
+    addNamespaceLookup,
+    describeLookupResolution,
+    listNamespaceLookups,
+    removeNamespaceLookup
+} from './lookup.js';
 import { sanitizeFactKey, suggestFactKey } from './suggest-key.js';
 import { extractFactCandidates } from './extract.js';
 import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
@@ -86,6 +96,15 @@ async function main() {
         case 'registries':
             await registriesCommand();
             break;
+        case 'lookup':
+            await lookupCommand(args);
+            break;
+        case 'public':
+            await publicCommand(args);
+            break;
+        case 'discover':
+            await discoverCommand(args);
+            break;
         case 'team':
             await teamCommand(args);
             break;
@@ -138,19 +157,39 @@ function printHelp() {
     console.log('  use <person>     # switch; creates local key if first time');
     console.log('');
     console.log('Registry (membership):');
-    console.log('  init <Registry> [--person you]   # person from context if omitted');
+    console.log('  init <Registry> [--person you]');
     console.log('  join <Registry|host/Registry>    # join as you (context)');
     console.log('  approve <Registry> [member]      # you (owner) approve member');
     console.log('  suspend <Registry> <member>      # you (owner) pause member');
     console.log('  team [Registry]                  # your registries only');
-    console.log('  facts [Registry]                 # list facts (prompt if many orgs)');
+    console.log('  facts [Registry]                 # list facts (+ parent ns / lookups)');
     console.log('  extract <file.md> [--dry-run]    # doc → proposed facts (never auto-publish)');
     console.log('  audit [--format json|csv]        # export org audit log');
     console.log('  ops events [--kind error|call] [--registry name]  # list ops_events');
     console.log('  registries                       # registries you own or belong to');
     console.log('');
+    console.log('Namespace resolution:');
+    console.log('  Parent  = implicit dotted hierarchy (sales.west → sales)');
+    console.log('  Lookup  = explicit read path (one-time registration, read-only)');
+    console.log('  lookup                           # list explicit lookups (active registry)');
+    console.log('  lookup add <from-ns> <target>    # target = ns or Registry/ns');
+    console.log('  lookup remove <from-ns> <target>');
+    console.log('  lookup <from-ns>                 # show parent chain + lookups for a ns');
+    console.log('  public                           # list org-public namespaces (active registry)');
+    console.log('  public <namespace>               # mark a namespace org-public for lookup');
+    console.log('  public off <namespace>           # make a namespace private again');
+    console.log('  public --registry [Registry]     # (coarse) mark whole registry org-public');
+    console.log('  discover                         # list org-public targets on this host');
+    console.log('');
+    console.log('Registry vs namespace (names must not collide):');
+    console.log('  Registry  = tenancy / membership / who may write & push');
+    console.log('  Namespace = topic folder inside a registry (dotted hierarchy)');
+    console.log('  Create a registry when you need a separate join/approve boundary.');
+    console.log('  Create a namespace when the same members group topics (sales.policy).');
+    console.log('  Do not reuse a registry name as a namespace (or its first segment).');
+    console.log('');
     console.log('Sync:');
-    console.log('  status | pull | push [selectors…]');
+    console.log('  status | pull | push [selectors…]  # push = home registry only');
     console.log('');
     console.log('Advanced (technical):');
     console.log('  key list | key create --person <name> [--namespaces a,b] [--api-key uf_…] [--remote]');
@@ -369,6 +408,22 @@ async function statusCommand() {
                     console.log(`    ${label.padEnd(10)} ${m.access.padEnd(4)}  ${m.person}`);
                 }
                 console.log(`  uni team ${activeReg}`);
+                try {
+                    const lookups = await listNamespaceLookups(activeReg);
+                    console.log(
+                        `  Lookups: ${lookups.length === 0 ? '(none — uni lookup add <from> <target>)' : lookups.length}`
+                    );
+                    for (const row of lookups.slice(0, 8)) {
+                        const target =
+                            row.target_registry.toLowerCase() === activeReg.toLowerCase()
+                                ? row.target_namespace
+                                : `${row.target_registry}/${row.target_namespace}`;
+                        console.log(`    ${row.from_namespace} → ${target} (read-only)`);
+                    }
+                    if (lookups.length > 8) console.log(`    … and ${lookups.length - 8} more`);
+                } catch {
+                    /* ignore */
+                }
             } catch (error) {
                 console.log(
                     `  (could not load team: ${error instanceof Error ? error.message : String(error)})`
@@ -642,7 +697,11 @@ async function initCommand(argv: string[]) {
         }
     }
     try {
-        const result = await initRegistry({ name, person, git_url: gitUrl });
+        const result = await initRegistry({
+            name,
+            person,
+            git_url: gitUrl
+        });
         console.log(`Initialized registry '${result.registry.name}'`);
         console.log(`  Owner: ${result.registry.owner_person}`);
         console.log(`  Key:   ${result.key.api_key} (ON)`);
@@ -660,8 +719,208 @@ async function initCommand(argv: string[]) {
         }
         console.log('Auth: person name + key secret (like user id + password). Role: owner.');
         console.log(`Others: uni use <them> && uni join ${result.registry.name}`);
+        console.log('Parent namespaces are implicit (dotted hierarchy). Explicit reads: uni lookup add …');
     } catch (error) {
         console.error('Init failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function lookupCommand(argv: string[]) {
+    const sub = argv[0];
+    try {
+        const person = await requireContextPerson();
+        const registry = await resolveActiveRegistry(person);
+        if (!registry) {
+            console.error('No active registry. uni init <Registry> or uni join …');
+            process.exit(1);
+        }
+
+        if (!sub) {
+            const description = await describeLookupResolution(registry);
+            console.log(`Registry: ${registry}`);
+            console.log(`  ${description.parent_note}`);
+            console.log('');
+            if (description.explicit_lookups.length === 0) {
+                console.log('Explicit lookups: (none)');
+                console.log('  Add: uni lookup add <from-ns> <target>');
+                console.log('  target = namespace or Registry/namespace');
+                console.log('  Example: uni lookup add baskcart.sales company.guidelines');
+                console.log('  Example: uni lookup add baskcart.sales Unifact/company.guidelines');
+                return;
+            }
+            console.log('Explicit lookups (read-only):');
+            for (const row of description.explicit_lookups) {
+                const target =
+                    row.target_registry.toLowerCase() === registry.toLowerCase()
+                        ? row.target_namespace
+                        : `${row.target_registry}/${row.target_namespace}`;
+                console.log(`  ${row.from_namespace} → ${target}`);
+            }
+            return;
+        }
+
+        if (sub === 'add') {
+            const from = argv[1];
+            const target = argv[2];
+            if (!from || !target) {
+                console.error('Usage: uni lookup add <from-ns> <target>');
+                console.error('  target = namespace or Registry/namespace');
+                process.exit(1);
+            }
+            const entry = await addNamespaceLookup({
+                registry,
+                from_namespace: from,
+                target,
+                person
+            });
+            const shown =
+                entry.target_registry.toLowerCase() === registry.toLowerCase()
+                    ? entry.target_namespace
+                    : `${entry.target_registry}/${entry.target_namespace}`;
+            console.log(`Lookup registered: ${entry.from_namespace} → ${shown}`);
+            console.log('  (read published facts only; cannot push/write to that path)');
+            return;
+        }
+
+        if (sub === 'remove' || sub === 'rm') {
+            const from = argv[1];
+            const target = argv[2];
+            if (!from || !target) {
+                console.error('Usage: uni lookup remove <from-ns> <target>');
+                process.exit(1);
+            }
+            const removed = await removeNamespaceLookup({
+                registry,
+                from_namespace: from,
+                target
+            });
+            if (!removed) {
+                console.error('Lookup not found');
+                process.exit(1);
+            }
+            console.log(`Removed lookup: ${from} → ${target}`);
+            return;
+        }
+
+        // uni lookup <from-ns> — show resolution for one namespace
+        const fromNs = sub;
+        const description = await describeLookupResolution(registry, fromNs);
+        console.log(`Resolution for ${registry} / ${fromNs}:`);
+        console.log(`  Parent chain (implicit): ${description.namespace_chain.join(' → ') || fromNs}`);
+        if (description.explicit_lookups.length === 0) {
+            console.log('  Explicit lookups: (none)');
+        } else {
+            console.log('  Explicit lookups (read-only):');
+            for (const row of description.explicit_lookups) {
+                const target =
+                    row.target_registry.toLowerCase() === registry.toLowerCase()
+                        ? row.target_namespace
+                        : `${row.target_registry}/${row.target_namespace}`;
+                console.log(`    via ${row.from_namespace} → ${target}`);
+            }
+        }
+    } catch (error) {
+        console.error('Lookup failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function publicCommand(argv: string[]) {
+    try {
+        const person = await requireContextPerson();
+        const activeRegistry = await resolveActiveRegistry(person);
+
+        // uni public                       -> list this registry's public namespaces
+        // uni public <namespace>           -> mark namespace org-public
+        // uni public off <namespace>       -> mark namespace private
+        // uni public --registry [Registry] -> whole registry org-public (coarse)
+        // uni public off --registry [Reg]  -> whole registry private
+        const off = argv[0] === 'off';
+        const rest = off ? argv.slice(1) : argv;
+        const wholeRegistry = rest[0] === '--registry' || rest[0] === '-r';
+        const wholeArgs = wholeRegistry ? rest.slice(1) : rest;
+
+        if (wholeRegistry) {
+            const registry = wholeArgs[0] || activeRegistry;
+            if (!registry) {
+                console.error('Usage: uni public --registry [Registry] | uni public off --registry [Registry]');
+                process.exit(1);
+            }
+            const updated = await setLookupVisibility({
+                registry,
+                visibility: off ? 'private' : 'org',
+                set_by: person
+            });
+            console.log(
+                off
+                    ? `Registry '${updated.name}' is private (whole-registry lookup off)`
+                    : `Registry '${updated.name}' is org-public — EVERY published fact is lookable. Prefer per-namespace: uni public <namespace>.`
+            );
+            return;
+        }
+
+        const namespace = wholeArgs[0];
+        if (!namespace) {
+            if (!activeRegistry) {
+                console.error('Usage: uni public <namespace> | uni public off <namespace> | uni public --registry');
+                process.exit(1);
+            }
+            const publics = await listPublicNamespaces(activeRegistry);
+            if (publics.length === 0) {
+                console.log(`Registry '${activeRegistry}' has no org-public namespaces.`);
+                console.log('  Publish one: uni public <namespace>   (e.g. uni public company.decisions)');
+            } else {
+                console.log(`Org-public namespaces in '${activeRegistry}':`);
+                for (const p of publics) console.log(`  ${p.namespace}`);
+            }
+            return;
+        }
+
+        if (!activeRegistry) {
+            console.error('No active registry. uni init <Registry> or uni join …');
+            process.exit(1);
+        }
+        const namespaces = await setNamespaceVisibility({
+            registry: activeRegistry,
+            namespace,
+            visibility: off ? 'private' : 'org',
+            set_by: person
+        });
+        if (off) {
+            console.log(`Namespace '${activeRegistry}/${namespace}' is private (members only).`);
+        } else {
+            console.log(`Namespace '${activeRegistry}/${namespace}' is org-public (published facts lookable, read-only).`);
+            console.log('  Descendant namespaces are included. Others: uni lookup add <local-ns> ' + `${activeRegistry}/${namespace}`);
+        }
+        if (namespaces.length > 0) {
+            console.log(`  Public now: ${namespaces.map((n) => n.namespace).join(', ')}`);
+        }
+    } catch (error) {
+        console.error('Public failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function discoverCommand(_argv: string[]) {
+    try {
+        const targets = await listOrgPublicTargets();
+        if (targets.length === 0) {
+            console.log('No org-public registries or namespaces on this host.');
+            console.log('  Owner: uni public <namespace>  (then others: uni lookup add <local-ns> Registry/namespace)');
+            return;
+        }
+        console.log('Org-public targets (published facts may be looked up, read-only):');
+        for (const t of targets) {
+            const label = t.whole_registry
+                ? `${t.registry}/*  (whole registry)`
+                : t.namespaces.map((ns) => `${t.registry}/${ns}`).join('\n  ');
+            console.log(`  ${label}${t.description ? `  — ${t.description}` : ''}`);
+        }
+        console.log('');
+        console.log('Example: uni lookup add my.topic Unifact/company.guidelines');
+    } catch (error) {
+        console.error('Discover failed:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
 }
@@ -900,13 +1159,27 @@ async function factsCommand(argv: string[]) {
             'working'
         ]);
 
-        console.log(`Facts (local) — registry context: ${picked.registry}`);
+        const lookups = await listNamespaceLookups(picked.registry).catch(() => []);
+
+        console.log(`Facts — registry: ${picked.registry}`);
         console.log(`  Person: ${picked.person}`);
+        console.log(
+            `  Parent namespaces: implicit (dotted hierarchy)`
+        );
+        console.log(
+            `  Explicit lookups: ${lookups.length === 0 ? '(none)' : lookups.length}`
+        );
+        for (const row of lookups.slice(0, 10)) {
+            const target =
+                row.target_registry.toLowerCase() === picked.registry.toLowerCase()
+                    ? row.target_namespace
+                    : `${row.target_registry}/${row.target_namespace}`;
+            console.log(`    ${row.from_namespace} → ${target}`);
+        }
         console.log('');
 
         if (facts.length === 0) {
-            console.log('  (none — uni add "…")');
-            return;
+            console.log('  (none local — uni add "…")');
         }
 
         const awaiting = facts.filter((f) =>
@@ -928,15 +1201,20 @@ async function factsCommand(argv: string[]) {
         }
 
         if (published.length > 0) {
-            console.log('Published:');
+            console.log('Published (local):');
             for (const fact of published) {
                 console.log(
                     `  ${fact.namespace}/${fact.key}  ${truncateFactValue(fact.value)}`
                 );
             }
+            console.log('');
         }
 
-        if (awaiting.length === 0 && published.length === 0) {
+        if (facts.length === 0 && lookups.length === 0) {
+            return;
+        }
+
+        if (awaiting.length === 0 && published.length === 0 && facts.length > 0) {
             for (const fact of facts) {
                 console.log(
                     `  [${fact.registry_channel}] ${fact.namespace}/${fact.key}  ${truncateFactValue(fact.value)}`

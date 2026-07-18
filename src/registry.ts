@@ -4,6 +4,8 @@ import { createApiKey, getApiKeyByPerson, setApiKeyEnabled, type ApiKeyRecord } 
 import { getMetadataFromGitUrl } from './git-metadata.js';
 import { pullFactsFromRemote, upsertFact } from './store.js';
 import { getRemoteBranchUrl, pushPersonKeyToRemote, type RemoteKeyPushResult } from './sync.js';
+import { assertRegistryNameAvailable } from './naming.js';
+import { namespaceChain } from './namespaces.js';
 
 export interface RegistryRecord {
     id: string;
@@ -11,6 +13,8 @@ export interface RegistryRecord {
     owner_person: string;
     description: string | null;
     git_url: string | null;
+    parent_registry: string | null;
+    lookup_visibility: 'private' | 'org';
     created_at: number;
     updated_at: number;
 }
@@ -55,12 +59,15 @@ function registryNamespaces(registryName: string): string[] {
 }
 
 function toRegistry(row: RegistryRow): RegistryRecord {
+    const visibility = row.lookup_visibility === 'org' ? 'org' : 'private';
     return {
         id: row.id,
         name: row.name,
         owner_person: row.owner_person,
         description: row.description,
         git_url: row.git_url,
+        parent_registry: row.parent_registry ?? null,
+        lookup_visibility: visibility,
         created_at: row.created_at,
         updated_at: row.updated_at
     };
@@ -164,6 +171,195 @@ export async function assertPersonMemberOfRegistry(
         );
     }
     return membership;
+}
+
+/**
+ * Writes (including push) are only allowed on registries the person belongs to.
+ * Explicit namespace lookups are read-only — they do not grant write/push.
+ */
+export async function assertCanWriteRegistry(person: string, targetRegistry: string): Promise<void> {
+    await assertPersonMemberOfRegistry(person, targetRegistry);
+}
+
+/** Org-public registries on this host (whole registry marked public). */
+export async function listOrgPublicRegistries(): Promise<RegistryRecord[]> {
+    const all = await listRegistries();
+    return all.filter((r) => r.lookup_visibility === 'org');
+}
+
+/**
+ * Owner sets whether the WHOLE registry is org-public for lookup/discovery.
+ * Prefer per-namespace visibility (setNamespaceVisibility) so internal
+ * namespaces (e.g. company.infrastructure) are not exposed. This coarse flag
+ * exposes every published fact in the registry.
+ */
+export async function setLookupVisibility(input: {
+    registry: string;
+    visibility: 'private' | 'org';
+    set_by: string;
+}): Promise<RegistryRecord> {
+    const registry = await requireRegistry(input.registry);
+    if (registry.owner_person !== input.set_by.trim()) {
+        throw new Error(`Only owner '${registry.owner_person}' can set lookup visibility for '${registry.name}'`);
+    }
+    const visibility = input.visibility === 'org' ? 'org' : 'private';
+    const now = Date.now();
+    await db.run(`UPDATE registries SET lookup_visibility = ?, updated_at = ? WHERE id = ?`, [
+        visibility,
+        now,
+        registry.id
+    ]);
+    const updated = await getRegistry(registry.name);
+    if (!updated) throw new Error('Failed to update lookup visibility');
+    return updated;
+}
+
+export interface PublicNamespaceRecord {
+    registry_name: string;
+    namespace: string;
+    created_at: number;
+    updated_at: number;
+}
+
+async function ensurePublicNamespacesTable(): Promise<void> {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS public_namespaces (
+        id TEXT PRIMARY KEY,
+        registry_name TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(registry_name, namespace)
+      )
+    `);
+}
+
+/** Namespaces explicitly marked org-public (per registry, or all registries). */
+export async function listPublicNamespaces(registryName?: string): Promise<PublicNamespaceRecord[]> {
+    await ensurePublicNamespacesTable();
+    const rows = registryName?.trim()
+        ? await db.all<PublicNamespaceRecord>(
+              `SELECT registry_name, namespace, created_at, updated_at FROM public_namespaces
+               WHERE lower(registry_name) = lower(?) ORDER BY namespace ASC`,
+              [normalizeRegistryName(registryName)]
+          )
+        : await db.all<PublicNamespaceRecord>(
+              `SELECT registry_name, namespace, created_at, updated_at FROM public_namespaces
+               ORDER BY registry_name ASC, namespace ASC`
+          );
+    return rows.map((r) => ({
+        registry_name: r.registry_name,
+        namespace: r.namespace,
+        created_at: r.created_at,
+        updated_at: r.updated_at
+    }));
+}
+
+/** True if `namespace` (or an ancestor in its dotted chain) is org-public in registry. */
+export async function isNamespacePublic(registryName: string, namespace: string): Promise<boolean> {
+    const publics = await listPublicNamespaces(registryName);
+    if (publics.length === 0) return false;
+    const set = new Set(publics.map((p) => p.namespace));
+    return namespaceChain(namespace).some((ns) => set.has(ns));
+}
+
+/**
+ * Owner marks a namespace org-public (or private) for cross-registry lookup.
+ * Publishing a namespace also opens its descendants (dotted hierarchy) for lookup.
+ */
+export async function setNamespaceVisibility(input: {
+    registry: string;
+    namespace: string;
+    visibility: 'private' | 'org';
+    set_by: string;
+}): Promise<PublicNamespaceRecord[]> {
+    await ensurePublicNamespacesTable();
+    const registry = await requireRegistry(input.registry);
+    if (registry.owner_person !== input.set_by.trim()) {
+        throw new Error(
+            `Only owner '${registry.owner_person}' can set namespace visibility for '${registry.name}'`
+        );
+    }
+    const ns = input.namespace.trim();
+    if (!ns) throw new Error('namespace is required');
+    const now = Date.now();
+    if (input.visibility === 'org') {
+        const existing = await db.get<{ id: string }>(
+            `SELECT id FROM public_namespaces WHERE lower(registry_name) = lower(?) AND namespace = ?`,
+            [registry.name, ns]
+        );
+        if (!existing) {
+            await db.run(
+                `INSERT INTO public_namespaces (id, registry_name, namespace, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [randomUUID(), registry.name, ns, now, now]
+            );
+        }
+    } else {
+        await db.run(
+            `DELETE FROM public_namespaces WHERE lower(registry_name) = lower(?) AND namespace = ?`,
+            [registry.name, ns]
+        );
+    }
+    return listPublicNamespaces(registry.name);
+}
+
+export type OrgPublicTarget = {
+    registry: string;
+    owner: string;
+    description: string | null;
+    whole_registry: boolean;
+    namespaces: string[];
+};
+
+/** Everything lookable from other registries on this host (uni discover / GET /v1/discover). */
+export async function listOrgPublicTargets(): Promise<OrgPublicTarget[]> {
+    const registries = await listRegistries();
+    const publics = await listPublicNamespaces();
+    const byRegistry = new Map<string, string[]>();
+    for (const p of publics) {
+        const list = byRegistry.get(p.registry_name) ?? [];
+        list.push(p.namespace);
+        byRegistry.set(p.registry_name, list);
+    }
+    const out: OrgPublicTarget[] = [];
+    for (const registry of registries) {
+        const namespaces = (byRegistry.get(registry.name) ?? []).sort();
+        const whole = registry.lookup_visibility === 'org';
+        if (!whole && namespaces.length === 0) continue;
+        out.push({
+            registry: registry.name,
+            owner: registry.owner_person,
+            description: registry.description,
+            whole_registry: whole,
+            namespaces
+        });
+    }
+    return out;
+}
+
+/**
+ * May this person register a read-only lookup into targetRegistry/targetNamespace?
+ * Allowed if the whole registry is org-public, the target namespace (or an
+ * ancestor) is org-public, or the person is a member of the target registry.
+ */
+export async function assertCanLookupNamespace(
+    person: string | null | undefined,
+    targetRegistry: string,
+    targetNamespace: string
+): Promise<void> {
+    const target = await requireRegistry(targetRegistry);
+    if (target.lookup_visibility === 'org') return;
+    if (await isNamespacePublic(target.name, targetNamespace)) return;
+    if (person?.trim()) {
+        const membership = await getPersonMembership(person, target.name);
+        if (membership) return;
+    }
+    throw new Error(
+        `Namespace '${target.name}/${targetNamespace}' is not open for lookup. ` +
+            `Ask the owner to publish it (uni public ${targetNamespace} — run on '${target.name}'), ` +
+            `or join the registry (uni join ${target.name}).`
+    );
 }
 
 export interface TeamMemberView {
@@ -282,6 +478,8 @@ export async function initRegistry(input: {
     person: string;
     description?: string;
     git_url?: string;
+    /** Parent registry for lookup (read-only for this org's members). */
+    parent_registry?: string | null;
     /** Preserve this secret (e.g. when mirroring an existing local key to origin). */
     api_key?: string;
     /**
@@ -293,6 +491,8 @@ export async function initRegistry(input: {
     const name = normalizeRegistryName(input.name);
     const person = input.person.trim();
     if (!person) throw new Error('--person is required');
+
+    await assertRegistryNameAvailable(name);
 
     let description = input.description ?? null;
     let gitUrl = input.git_url?.trim() || null;
@@ -306,17 +506,21 @@ export async function initRegistry(input: {
         }
     }
 
-    const existing = await getRegistry(name);
-    if (existing) {
-        throw new Error(`Registry '${name}' already exists (owner: ${existing.owner_person})`);
+    let parentName: string | null = null;
+    if (input.parent_registry?.trim()) {
+        const parent = await requireRegistry(input.parent_registry);
+        parentName = parent.name;
+        if (parent.name.toLowerCase() === name.toLowerCase()) {
+            throw new Error('Registry cannot be its own parent');
+        }
     }
 
     const now = Date.now();
     const id = randomUUID();
     await db.run(
-        `INSERT INTO registries (id, name, owner_person, description, git_url, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [id, name, person, description, gitUrl, now, now]
+        `INSERT INTO registries (id, name, owner_person, description, git_url, parent_registry, lookup_visibility, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'private', ?, ?)`,
+        [id, name, person, description, gitUrl, parentName, now, now]
     );
 
     const key = await createApiKey({
@@ -364,6 +568,7 @@ async function mirrorRegistryToRemote(input: {
                 person: input.key.person,
                 description: input.registry.description ?? undefined,
                 git_url: input.registry.git_url ?? undefined,
+                parent_registry: input.registry.parent_registry ?? undefined,
                 api_key: input.key.api_key
             })
         });
@@ -546,10 +751,15 @@ export async function approveJoin(input: {
     }
     if (!request) throw new Error('Failed to approve join request');
 
+    const existingKey = await getApiKeyByPerson(person);
+    const nsForRegistry = registryNamespaces(registryName);
+    const namespaces = existingKey?.namespaces?.length
+        ? [...new Set([...existingKey.namespaces, ...nsForRegistry])]
+        : nsForRegistry;
     const key = await createApiKey({
         person,
-        registry_name: registryName,
-        namespaces: registryNamespaces(registryName),
+        registry_name: existingKey?.registry_name ? undefined : registryName,
+        namespaces,
         enabled: true
     });
 

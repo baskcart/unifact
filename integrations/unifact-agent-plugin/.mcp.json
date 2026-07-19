@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "unifact": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/server/launch-mcp.mjs"
+      ],
+      "env": {
+        "DATABASE_PATH": "${CLAUDE_PLUGIN_DATA}/store.db"
+      }
+    }
+  }
+}

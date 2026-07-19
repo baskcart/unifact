@@ -1,0 +1,10 @@
+{
+  "name": "unifact",
+  "description": "Ground Claude in governed organizational facts and provide a safe Fact Check workflow",
+  "version": "0.2.0",
+  "author": {
+    "name": "UniFact"
+  },
+  "homepage": "https://www.unifact.ai",
+  "repository": "https://github.com/baskcart/unifact"
+}

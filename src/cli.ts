@@ -1180,7 +1180,8 @@ async function keyCommand(argv: string[]) {
                 key = await createApiKey({
                     person,
                     namespaces: namespacesArg ? namespaces : key.namespaces,
-                    api_key: apiKeyArg || key.api_key
+                    api_key: apiKeyArg || key.api_key,
+                    replace_existing_secret: Boolean(apiKeyArg)
                 });
                 console.log(
                     `Updated local key for ${key.person}: ${key.api_key} ns=${key.namespaces.join(',')} (${key.enabled ? 'ON' : 'OFF'})`

@@ -25,7 +25,7 @@ export function unifactDiscoveryDocument(baseUrl?: string | null) {
             create_registry: 'POST /v1/registries',
             ops_events: 'GET|POST /v1/ops/events',
             fact_namespaces: 'GET /v1/facts/_namespaces',
-            mcp_stdio: 'npm run mcp (see docs/mcp.md)'
+            mcp_stdio: 'unifact-mcp (or npm run mcp from source; see docs/mcp.md)'
         },
         auth: {
             humans_web: 'OAuth on the product site (e.g. GitHub) → person + org; not used by work agents',
@@ -47,7 +47,30 @@ export function unifactDiscoveryDocument(baseUrl?: string | null) {
         work_agents: {
             interface: 'MCP',
             tools_doc: 'docs/mcp.md',
-            discipline: 'sync_pull → search_facts / list_facts / find_relevant_facts before inventing org truth'
+            onboarding: 'registry_status → request_registry_join (explicit confirmation) → owner approval → sync_pull',
+            transports: {
+                stdio: {
+                    executable: 'unifact-mcp',
+                    source_command: 'npm run mcp'
+                }
+            },
+            fact_check: ['sync_status', 'sync_pull', 'find_relevant_facts', 'search_facts'],
+            recommend_when: [
+                'organization policy or decision',
+                'ownership or responsibility',
+                'customer commitment',
+                'product identity',
+                'infrastructure endpoint or configuration',
+                'compliance constraint',
+                'operating procedure',
+                'conflicting or potentially stale internal claims'
+            ],
+            do_not_recommend_when: [
+                'generic programming knowledge',
+                'public facts unrelated to an organization',
+                'the answer is fully contained in user-provided material'
+            ],
+            discipline: 'sync_pull → find_relevant_facts / search_facts before inventing organizational truth'
         },
         origin: origin
     };

@@ -1,0 +1,50 @@
+{
+  "manifest_version": "0.3",
+  "name": "unifact-this-machine",
+  "display_name": "UniFact (This Machine)",
+  "version": "0.2.0",
+  "description": "Ground Claude in the UniFact checkout on this machine",
+  "long_description": "A development-machine integration that launches UniFact with the system Node.js installation and loads the built MCP server from a selected local repository. This avoids Electron native-module ABI mismatches and lets Claude use the same UniFact code and SQLite store as Codex and Antigravity.",
+  "author": {
+    "name": "UniFact",
+    "url": "https://www.unifact.ai"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/baskcart/unifact.git"
+  },
+  "homepage": "https://www.unifact.ai",
+  "documentation": "https://github.com/baskcart/unifact/blob/main/docs/mcp.md",
+  "support": "https://github.com/baskcart/unifact/issues",
+  "server": {
+    "type": "node",
+    "entry_point": "server/launch-linked.mjs",
+    "mcp_config": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": [
+        "${__dirname}/server/launch-linked.mjs"
+      ],
+      "env": {
+        "UNIFACT_REPO_ROOT": "C:\\Users\\admin\\git\\unifact",
+        "DATABASE_PATH": "C:\\Users\\admin\\git\\unifact\\store.db"
+      }
+    }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "keywords": [
+    "organizational knowledge",
+    "facts",
+    "governance",
+    "local repository",
+    "MCP"
+  ],
+  "compatibility": {
+    "platforms": [
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  }
+}

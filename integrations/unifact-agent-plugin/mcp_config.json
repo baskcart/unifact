@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "unifact": {
+      "command": "node",
+      "args": [
+        "server/launch-mcp.mjs"
+      ]
+    }
+  }
+}

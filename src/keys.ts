@@ -22,6 +22,8 @@ export interface CreateApiKeyInput {
     api_key?: string;
     enabled?: boolean;
     registry_name?: string | null;
+    /** Local CLI only: explicitly replace a temporary local secret with an origin-issued secret. */
+    replace_existing_secret?: boolean;
 }
 
 function rowToRecord(row: ApiKeyRow): ApiKeyRecord {
@@ -120,10 +122,15 @@ export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyReco
     }
 
     const existing = await getApiKeyByPerson(person);
-    if (existing && input.api_key?.trim() && existing.api_key !== input.api_key.trim()) {
+    if (
+        existing &&
+        input.api_key?.trim() &&
+        existing.api_key !== input.api_key.trim() &&
+        input.replace_existing_secret !== true
+    ) {
         throw new Error(
             `Person '${person}' already has a different key on this host. ` +
-                `Install that key locally (uni key create --person ${person} --api-key …), or use a new person name.`
+                `Use the local CLI's explicit key import, or use a new person name.`
         );
     }
     const namespaces = input.namespaces?.length

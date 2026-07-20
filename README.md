@@ -133,9 +133,9 @@ Enterprise readiness (tenancy, audit, checklist): [`docs/enterprise-readiness.md
 
 Deep setup / troubleshooting: [`docs/mcp.md`](docs/mcp.md) · example config: [`.cursor/mcp.json.example`](.cursor/mcp.json.example)
 
-### Integrate (any MCP host)
+### Integrate from source (any MCP host)
 
-1. Clone this repo and `npm install`. Rebuild native modules if needed: `npm rebuild better-sqlite3` (must match the **same Node major** the MCP process uses).
+1. Clone this repo, run `npm install && npm run build`, and rebuild native modules if needed with `npm rebuild better-sqlite3` (the MCP process must use the same Node major).
 2. Create or approve a person for the agent (`uni use cursorAgent`, join/approve on your org registry).
 3. Add a stdio MCP server to your host (Cursor `~/.cursor/mcp.json`, Claude Desktop, Codex, etc.):
 
@@ -145,8 +145,7 @@ Deep setup / troubleshooting: [`docs/mcp.md`](docs/mcp.md) · example config: [`
     "unifact": {
       "command": "C:/Program Files/nodejs/node.exe",
       "args": [
-        "C:/PATH/TO/unifact/node_modules/tsx/dist/cli.mjs",
-        "C:/PATH/TO/unifact/src/mcp.ts"
+        "C:/PATH/TO/unifact/dist/mcp.js"
       ],
       "env": {
         "DATABASE_PATH": "C:/PATH/TO/unifact/store.db"
@@ -156,10 +155,18 @@ Deep setup / troubleshooting: [`docs/mcp.md`](docs/mcp.md) · example config: [`
 }
 ```
 
-Use **absolute paths**. Point `command` at the system Node that matches `better-sqlite3` (IDE-bundled Node often breaks native modules).
+Use **absolute paths**. `npm link` also installs the `unifact-mcp` executable. Point `command` at the Node runtime that installed `better-sqlite3`.
 
 4. Fact Check before work that depends on org truth: `sync_pull`, then `search_facts` / `list_facts` / `find_relevant_facts`.
 5. Propose with `propose_fact` / `upsert_fact`. Publish only through your org’s review rules (`publish_fact` / CLI `uni publish`).
+
+### Agent packages
+
+- Shared Antigravity + Claude Code plugin: [`integrations/unifact-agent-plugin`](integrations/unifact-agent-plugin)
+- Claude Desktop MCP Bundle source: [`integrations/claude-desktop`](integrations/claude-desktop)
+- Build a Windows Claude Desktop bundle: `npm run build:claude-desktop`
+
+The plugin includes a model-invoked Fact Check skill. It activates for organization-specific or changing truth and stays dormant for generic programming knowledge.
 
 ### All MCP tools
 

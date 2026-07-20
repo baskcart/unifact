@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import 'dotenv/config';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -11,6 +12,12 @@ import {
     listNamespaceLookups,
     searchFactsWithLookup
 } from './lookup.js';
+import {
+    approveRemoteRegistryJoin,
+    getRegistryOnboardingStatus,
+    listRemoteRegistryJoinRequests,
+    requestRemoteRegistryJoin
+} from './onboarding.js';
 import {
     approveFact,
     deleteAgentProfile,
@@ -51,12 +58,26 @@ import {
     FACT_TYPES
 } from './model.js';
 
+export const UNIFACT_MCP_INSTRUCTIONS = [
+    'Use UniFact when work depends on current organization-specific truth: policies, decisions, ownership, customer commitments, product identity, infrastructure endpoints, compliance constraints, or operating procedures.',
+    'If no registry is connected, use registry_status. After the user explicitly asks to join, use request_registry_join; do not send a join request silently.',
+    'Before relying on memory or repository prose for those topics, run sync_pull when an upstream is configured, then use find_relevant_facts or search_facts.',
+    'Treat published facts as governed truth. Proposed, review, and feedback facts are context, not final policy.',
+    'Agents may propose facts when permitted, but must not publish, retract, delete, approve, or reject facts without explicit user authorization.'
+].join(' ');
+
+export function createUnifactMcpServer(): McpServer {
 type JsonObject = Record<string, unknown>;
 
-const server = new McpServer({
-    name: 'unifact',
-    version: '0.2.0'
-});
+const server = new McpServer(
+    {
+        name: 'unifact',
+        version: '0.2.0'
+    },
+    {
+        instructions: UNIFACT_MCP_INSTRUCTIONS
+    }
+);
 
 const optionalRegistryField = {
     registry: z.string().min(1).optional().describe('Org registry name; must match membership if provided')
@@ -155,7 +176,7 @@ function errorResult(message: string) {
 }
 
 server.registerTool('list_namespaces', {
-    description: 'List namespaces in the UniFact store with fact counts',
+    description: 'Discover available categories of organizational truth in UniFact, with fact counts',
     inputSchema: {
         ...optionalRegistryField
     }
@@ -181,14 +202,76 @@ server.registerTool('list_namespaces', {
 });
 
 server.registerTool('registry_metadata', {
-    description: 'Get cloud-neutral Unifact registry metadata, capabilities, tenant isolation, and upstream configuration'
+    description: 'Inspect the active UniFact organization registry, capabilities, tenant isolation, and upstream configuration before fact-dependent work'
 }, async () => {
     return toolResult(await getRegistryMetadata());
 });
 
+server.registerTool('registry_status', {
+    description: 'Check local UniFact identity, membership, upstream connection, and whether hosted pull is ready; never returns API-key secrets'
+}, async () => {
+    try {
+        return toolResult(await getRegistryOnboardingStatus());
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('request_registry_join', {
+    description: 'Request pending membership in a hosted UniFact registry without a command line. Use only after the user explicitly asks to join. Creates a local device identity and sends its key directly to the hosted registry as disabled; the secret is never returned to the model.',
+    inputSchema: {
+        registry: z.string().min(1).describe('Hosted organization registry name, for example Unifact'),
+        person: z.string().min(1).describe('Dedicated person or agent identity, for example claudeDesktop'),
+        upstream_url: z.string().url().optional().describe('Hosted UniFact origin; defaults to https://staging.unifact.ai'),
+        message: z.string().max(500).optional().describe('Optional message for the registry owner'),
+        confirm: z.literal(true).describe('Must be true only after the user explicitly confirms sending the external join request')
+    }
+}, async ({ registry, person, upstream_url, message }) => {
+    try {
+        return toolResult(await requestRemoteRegistryJoin({
+            registry,
+            person,
+            upstream_url,
+            message
+        }));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('list_registry_join_requests', {
+    description: 'For a hosted UniFact registry owner, list pending membership requests without exposing any API-key secret',
+    inputSchema: {
+        registry: z.string().min(1).describe('Hosted organization registry name'),
+        upstream_url: z.string().url().optional().describe('Hosted UniFact origin; otherwise uses configured upstream')
+    }
+}, async ({ registry, upstream_url }) => {
+    try {
+        return toolResult(await listRemoteRegistryJoinRequests({ registry, upstream_url }));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('approve_registry_join', {
+    description: 'Approve a pending hosted UniFact membership request and activate its pre-registered device key. Registry-owner action: use only after the owner explicitly names the person and confirms approval. Never returns the key secret.',
+    inputSchema: {
+        registry: z.string().min(1).describe('Hosted organization registry name'),
+        person: z.string().min(1).describe('Exact pending person or agent identity to approve'),
+        upstream_url: z.string().url().optional().describe('Hosted UniFact origin; otherwise uses configured upstream'),
+        confirm: z.literal(true).describe('Must be true only after the registry owner explicitly confirms this approval')
+    }
+}, async ({ registry, person, upstream_url }) => {
+    try {
+        return toolResult(await approveRemoteRegistryJoin({ registry, person, upstream_url }));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
 server.registerTool('list_facts', {
     description:
-        'List facts in a namespace. Resolves local → parent namespaces (implicit dotted hierarchy) → explicit lookups (published, read-only).',
+        'List governed organizational facts in a namespace. Resolves local → parent namespaces (implicit dotted hierarchy) → explicit lookups (published, read-only). Includes provenance, lifecycle, and freshness metadata.',
     inputSchema: {
         namespace: z.string().min(1).describe('Namespace to list, for example company.decisions'),
         lookup: z
@@ -216,7 +299,7 @@ server.registerTool('list_facts', {
 
 server.registerTool('get_fact', {
     description:
-        'Get one fact by namespace and key. Resolves local → parent namespaces → explicit lookups. Parent/lookup hits have writable: false.',
+        'Get one governed organizational fact by namespace and key. Resolves local → parent namespaces → explicit lookups. Parent/lookup hits have writable: false. Includes provenance and lifecycle metadata.',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
@@ -240,7 +323,7 @@ server.registerTool('get_fact', {
 
 server.registerTool('search_facts', {
     description:
-        'Search facts in the home registry and explicit lookup targets (published). Parent hierarchy is namespace-scoped at get/list time.',
+        'Search UniFact before relying on memory for organization-specific policies, decisions, ownership, customers, infrastructure, compliance, or operations. Searches the home registry and explicit lookup targets (published). Parent hierarchy is namespace-scoped at get/list time.',
     inputSchema: {
         query: z.string().min(1).describe('Full-text search query'),
         lookup: z.boolean().optional().describe('Include explicit lookup targets (default true)'),
@@ -262,7 +345,7 @@ server.registerTool('search_facts', {
 });
 
 server.registerTool('find_relevant_facts', {
-    description: 'Find facts ranked for an agent profile, intent, subject, scope, and actionability',
+    description: 'Fact Check: rank governed organizational facts for the current task by agent profile, intent, subject, scope, and actionability',
     inputSchema: {
         profile_id: z.string().optional().describe('Agent profile id to rank facts for'),
         namespace: z.string().optional().describe('Optional namespace filter'),
@@ -706,7 +789,7 @@ server.registerTool('delete_agent_profile', {
 });
 
 server.registerTool('sync_status', {
-    description: 'Get upstream staging registry status and configuration'
+    description: 'Check whether this local UniFact store is connected to an upstream organizational registry and whether synchronization is available'
 }, async () => {
     try {
         return toolResult(await getSyncStatus());
@@ -716,7 +799,7 @@ server.registerTool('sync_status', {
 });
 
 server.registerTool('sync_pull', {
-    description: 'Pull published facts from the configured upstream registry',
+    description: 'Refresh governed published facts from the configured upstream registry before organization-dependent work',
     inputSchema: {
         namespaces: z.array(z.string()).optional().describe('Optional list of namespaces to pull')
     }
@@ -749,13 +832,44 @@ server.registerTool('sync_push', {
     }
 });
 
-async function main() {
+server.registerPrompt('fact_check', {
+    title: 'Fact Check organizational truth',
+    description: 'Check UniFact before answering or acting on organization-specific or potentially changing information',
+    argsSchema: {
+        task: z.string().min(1).describe('The task or question that may depend on organizational truth')
+    }
+}, ({ task }) => ({
+    description: 'Ground the task in governed UniFact records before proceeding',
+    messages: [
+        {
+            role: 'user',
+            content: {
+                type: 'text',
+                text: [
+                    `Fact Check this task: ${task}`,
+                    'If an upstream is configured, call sync_pull first.',
+                    'Then call find_relevant_facts using the task intent and useful subject/scope hints; use search_facts if broader recall is needed.',
+                    'Distinguish published truth from proposed, review, or feedback context.',
+                    'If no relevant fact exists, say so rather than inventing organizational policy. Offer to propose a fact when appropriate; do not publish without explicit user authorization.'
+                ].join('\n')
+            }
+        }
+    ]
+}));
+
+return server;
+}
+
+export async function runStdioMcpServer() {
+    const server = createUnifactMcpServer();
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error('UniFact MCP server running on stdio');
 }
 
-main().catch(err => {
-    console.error('UniFact MCP server failed:', err);
-    process.exit(1);
-});
+if (require.main === module) {
+    runStdioMcpServer().catch(err => {
+        console.error('UniFact MCP server failed:', err);
+        process.exit(1);
+    });
+}

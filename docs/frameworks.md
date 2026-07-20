@@ -17,7 +17,7 @@ Example host: `https://staging.unifact.ai/.well-known/unifact.json`
 
 | Consumer | How |
 |----------|-----|
-| **Cursor / Claude / Codex / MCP hosts** | Stdio MCP — [`docs/mcp.md`](mcp.md) |
+| **Cursor / Claude Code/Desktop / Codex / Antigravity** | Stdio MCP and agent plugin — [`docs/mcp.md`](mcp.md) |
 | **HTTP apps (Next.js, etc.)** | `UNIFACT_URL` + person/service key → `/v1/facts/...` |
 | **CLI** | `uni` — pull / push / propose / publish |
 | **Custom agents** | Same MCP tools or REST; Fact Check first |
@@ -40,7 +40,7 @@ Details: [`config-as-facts.md`](config-as-facts.md) · Auth.js-style loader exam
 | Cursor / Codex “native UniFact” | Prefer **MCP** (already works) over product-specific forks |
 | npm `unifact` / `uni` CLI | Publish/link this package; keywords help discovery |
 
-Visibility today = **well-known discovery + MCP + docs + examples**. Framework PRs make sense later as thin adapters that call discovery + facts — not as replacing OAuth.
+Visibility today = **well-known discovery + stdio MCP + Fact Check skill + Antigravity/Claude packages + docs + examples**. A public streamable-HTTP MCP endpoint with OAuth is still required for Claude.ai, Cowork, and other cloud-hosted connectors; follow the [remote MCP plan](remote-mcp.md) rather than sharing a local agent key.
 
 ## Checklist for a new framework adapter
 

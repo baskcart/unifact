@@ -7,6 +7,7 @@ import { unifactDiscoveryDocument } from './discovery.js';
 import {
     createApiKey,
     findApiKeyBySecret,
+    getApiKeyByPerson,
     listApiKeys,
     setApiKeyEnabled
 } from './keys.js';
@@ -70,6 +71,22 @@ const app = express();
 const PORT = process.env.PORT || 4110;
 
 app.use(express.json());
+
+const publicJoinAttempts = new Map<string, { count: number; resetAt: number }>();
+function limitPublicJoin(req: Request, res: Response, next: () => void) {
+    const now = Date.now();
+    const identity = req.ip || req.socket.remoteAddress || 'unknown';
+    const current = publicJoinAttempts.get(identity);
+    if (!current || current.resetAt <= now) {
+        publicJoinAttempts.set(identity, { count: 1, resetAt: now + 60_000 });
+        return next();
+    }
+    if (current.count >= 10) {
+        return res.status(429).json({ error: 'Too many join requests; try again shortly' });
+    }
+    current.count += 1;
+    return next();
+}
 
 app.get('/healthz', (_req: Request, res: Response) => {
     return res.json({
@@ -318,14 +335,42 @@ app.post('/v1/registries', allowPublicOrgCreate(), async (req: Request, res: Res
     }
 });
 
-app.post('/v1/registries/:name/join', requireAuthOrBootstrap('write'), async (req: Request, res: Response) => {
+app.post('/v1/registries/:name/join', limitPublicJoin, async (req: Request, res: Response) => {
     try {
         const body = bodyAsRecord(req);
+        const person = String(body.person || '').trim();
+        if (!/^[A-Za-z0-9][A-Za-z0-9_.@-]{0,79}$/.test(person)) {
+            return res.status(400).json({ error: 'Invalid person name' });
+        }
+        const candidateKey = typeof body.candidate_api_key === 'string'
+            ? body.candidate_api_key.trim()
+            : '';
+        if (candidateKey && (!candidateKey.startsWith('uf_') || candidateKey.length > 256)) {
+            return res.status(400).json({ error: 'Invalid candidate device key' });
+        }
         const request = await requestJoin({
             registry: req.params.name,
-            person: String(body.person || ''),
+            person,
             message: typeof body.message === 'string' ? body.message : undefined
         });
+        if (candidateKey) {
+            const existing = await getApiKeyByPerson(person);
+            if (existing && existing.api_key !== candidateKey) {
+                return res.status(409).json({
+                    error: 'This person already has a different device key; use a distinct agent identity'
+                });
+            }
+            if (!existing) {
+                await createApiKey({
+                    person,
+                    api_key: candidateKey,
+                    enabled: false,
+                    registry_name: request.registry_name,
+                    namespaces: ['*'],
+                    scopes: ['read', 'write']
+                });
+            }
+        }
         return res.json({ success: true, request });
     } catch (err) {
         return handleError(res, err, 'Failed to request join');
@@ -334,6 +379,11 @@ app.post('/v1/registries/:name/join', requireAuthOrBootstrap('write'), async (re
 
 app.get('/v1/registries/:name/requests', requireAuth('read'), async (req: Request, res: Response) => {
     try {
+        const caller = await findApiKeyBySecret(getApiKey(req));
+        const registry = await getRegistry(req.params.name);
+        if (!caller || !registry || caller.person !== registry.owner_person) {
+            return res.status(403).json({ error: 'Only the registry owner may list join requests' });
+        }
         const requests = await listJoinRequests(req.params.name);
         return res.json({ requests, count: requests.length });
     } catch (err) {
@@ -344,15 +394,18 @@ app.get('/v1/registries/:name/requests', requireAuth('read'), async (req: Reques
 app.post('/v1/registries/:name/approve', requireAuth('write'), async (req: Request, res: Response) => {
     try {
         const body = bodyAsRecord(req);
-        const apiKey = getApiKey(req);
-        // approved_by must match owner; prefer body, else look up from key later — require body.person of joiner + approved_by
+        const caller = await findApiKeyBySecret(getApiKey(req));
+        const registry = await getRegistry(req.params.name);
+        if (!caller || !registry || caller.person !== registry.owner_person) {
+            return res.status(403).json({ error: 'Only the registry owner may approve join requests' });
+        }
+        // Attribute approval to the authenticated owner; never trust a caller-supplied owner name.
         const result = await approveJoin({
             registry: req.params.name,
             person: String(body.person || ''),
-            approved_by: String(body.approved_by || ''),
+            approved_by: caller.person,
             pull: body.pull === true
         });
-        void apiKey;
         return res.json({ success: true, ...result });
     } catch (err) {
         return handleError(res, err, 'Failed to approve join');

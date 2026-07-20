@@ -1,0 +1,58 @@
+{
+  "manifest_version": "0.3",
+  "name": "unifact",
+  "display_name": "UniFact",
+  "version": "0.2.0",
+  "description": "Ground Claude in governed organizational facts",
+  "long_description": "UniFact gives Claude a governed source of organizational truth for policies, decisions, ownership, customer commitments, product identity, infrastructure, compliance, and operating procedures. It supports read-first Fact Checks and controlled fact proposals while reserving publication and destructive lifecycle actions for explicit user approval.",
+  "author": {
+    "name": "UniFact",
+    "url": "https://www.unifact.ai"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/baskcart/unifact.git"
+  },
+  "homepage": "https://www.unifact.ai",
+  "documentation": "https://github.com/baskcart/unifact/blob/main/docs/mcp.md",
+  "support": "https://github.com/baskcart/unifact/issues",
+  "server": {
+    "type": "node",
+    "entry_point": "server/mcp.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/mcp.js"
+      ],
+      "env": {
+        "DATABASE_PATH": "${user_config.database_path}"
+      }
+    }
+  },
+  "user_config": {
+    "database_path": {
+      "type": "file",
+      "title": "UniFact database",
+      "description": "Choose an existing UniFact SQLite store, or keep the default path for a separate Claude store.",
+      "default": "${HOME}/.unifact/store.db",
+      "required": true
+    }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "keywords": [
+    "organizational knowledge",
+    "facts",
+    "governance",
+    "source of truth",
+    "MCP"
+  ],
+  "compatibility": {
+    "platforms": [
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  }
+}

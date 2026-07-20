@@ -9,6 +9,10 @@ store.db-*
 .codex/
 .cursor/mcp.json
 *.log
+/release/
+/.mcpb-build/
+/.mcpb-build-linked/
+/.mcpb-cache/
 *.pem
 *.ppk
 LightsailDefaultKey*

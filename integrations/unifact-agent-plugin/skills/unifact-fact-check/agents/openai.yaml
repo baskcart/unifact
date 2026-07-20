@@ -1,0 +1,14 @@
+interface:
+  display_name: "Unifact Fact Check"
+  short_description: "Ground organization-specific work in governed facts"
+  default_prompt: "Use $unifact-fact-check to verify the organizational facts relevant to this task."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "unifact"
+      description: "UniFact governed organizational fact registry"
+      transport: "stdio"
+
+policy:
+  allow_implicit_invocation: true

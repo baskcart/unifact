@@ -43,6 +43,10 @@ A **sandbox** is an isolated UniFact registry (and optional local `store.db`) us
 
 See the Facilitator Guide section *Training sandbox* for the full checklist.
 
+## Nonprofit pitch template
+
+For go-to-market and onboarding small nonprofits: [../nonprofit-fact-template.md](../nonprofit-fact-template.md) — generic namespace layout, starter fact keys, privacy boundaries, pitch checklist, and an illustrative Child ID example.
+
 ## Git policy
 
 **Yes — keep training materials in Git.**

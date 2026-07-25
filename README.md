@@ -121,11 +121,14 @@ uni lookup | lookup add <from> <target> | lookup remove …
 uni add "<value>"
 uni extract <file.md> [--dry-run]   # → proposed only
 uni publish <namespace/key> | feedback <namespace/key>
-uni audit [--format json|csv]
+uni get <namespace/key> [--at <iso|ms>]
+uni list <namespace> [--at <iso|ms>]
+uni as-of <namespace/key> --at <iso|ms>   # alias for get --at
+uni audit [--format json|csv]             # org export; includes actor
 uni pull | push [ns | ns/key | pattern*]
 ```
 
-Enterprise readiness (tenancy, audit, checklist): [`docs/enterprise-readiness.md`](docs/enterprise-readiness.md)
+Enterprise readiness (tenancy, audit, as_of, provenance): [`docs/enterprise-readiness.md`](docs/enterprise-readiness.md)
 
 ## Work Agents & MCP
 
@@ -173,9 +176,10 @@ The plugin includes a model-invoked Fact Check skill. It activates for organizat
 | Area | Tools |
 |------|--------|
 | Sync | `sync_pull`, `sync_push`, `sync_status` |
-| Read | `list_facts`, `get_fact`, `search_facts`, `find_relevant_facts`, `list_namespaces`, `registry_metadata`, `pull_facts_for_agent` |
+| Read | `list_facts`, `get_fact` (optional `at`/`as_of`), `search_facts`, `find_relevant_facts`, `list_namespaces`, `registry_metadata`, `pull_facts_for_agent` |
+| Point-in-time | `get_fact_as_of`, `list_facts_as_of` (aliases; required `at`) |
 | Write / lifecycle | `propose_fact`, `upsert_fact`, `publish_fact`, `feedback_fact`, `approve_fact`, `reject_fact`, `review_fact`, `supersede_fact`, `retract_fact`, `delete_fact`, `list_review_queue`, `list_fact_versions` |
-| Audit | `audit_fact`, `export_audit_log` |
+| Audit | `audit_fact`, `export_audit_log` (includes actor) |
 | Extract | `extract_facts_from_document` |
 | Agent profiles | `list_agent_profiles`, `get_agent_profile`, `upsert_agent_profile`, `delete_agent_profile` |
 

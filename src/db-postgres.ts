@@ -119,6 +119,45 @@ async function resolveDefaultRegistryNamePostgres(pool: pg.Pool): Promise<string
     });
 }
 
+/** Fill audit_log.actor from JSON snapshots / fact_versions when missing. */
+async function backfillAuditActorsPostgres(pool: pg.Pool): Promise<void> {
+    try {
+        await pool.query(`
+          UPDATE audit_log AS a
+          SET actor = COALESCE(
+            NULLIF(trim(
+              CASE WHEN a.new_snapshot ~ '^\\s*\\{' THEN a.new_snapshot::jsonb ->> 'published_by' ELSE NULL END
+            ), ''),
+            NULLIF(trim(
+              CASE WHEN a.new_snapshot ~ '^\\s*\\{' THEN a.new_snapshot::jsonb ->> 'approved_by' ELSE NULL END
+            ), ''),
+            NULLIF(trim(
+              CASE WHEN a.new_snapshot ~ '^\\s*\\{' THEN a.new_snapshot::jsonb ->> 'created_by' ELSE NULL END
+            ), ''),
+            NULLIF(trim(
+              CASE WHEN a.old_snapshot ~ '^\\s*\\{' THEN a.old_snapshot::jsonb ->> 'published_by' ELSE NULL END
+            ), ''),
+            NULLIF(trim(
+              CASE WHEN a.old_snapshot ~ '^\\s*\\{' THEN a.old_snapshot::jsonb ->> 'created_by' ELSE NULL END
+            ), ''),
+            (
+              SELECT fv.author FROM fact_versions fv
+              WHERE fv.registry_name = a.registry_name
+                AND fv.namespace = a.namespace
+                AND fv.key = a.key
+                AND fv.created_at = a.timestamp
+                AND fv.author IS NOT NULL AND trim(fv.author) != ''
+              ORDER BY fv.id DESC
+              LIMIT 1
+            )
+          )
+          WHERE a.actor IS NULL OR trim(a.actor) = ''
+        `);
+    } catch (err) {
+        console.error('[unifact] audit actor backfill skipped:', err instanceof Error ? err.message : err);
+    }
+}
+
 async function migrateFactsToOrgPartitionPostgres(pool: pg.Pool): Promise<void> {
     await pool.query(`ALTER TABLE facts ADD COLUMN IF NOT EXISTS registry_name TEXT`);
     await pool.query(`ALTER TABLE fact_versions ADD COLUMN IF NOT EXISTS registry_name TEXT`);
@@ -248,6 +287,7 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
         new_value TEXT,
         old_snapshot TEXT,
         new_snapshot TEXT,
+        actor TEXT,
         timestamp BIGINT NOT NULL
       );
 
@@ -385,6 +425,12 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
     await pool.query(`
       ALTER TABLE registries ADD COLUMN IF NOT EXISTS lookup_visibility TEXT DEFAULT 'private'
     `).catch(() => undefined);
+
+    await pool.query(`
+      ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS actor TEXT
+    `).catch(() => undefined);
+
+    await backfillAuditActorsPostgres(pool);
 
     // Must run before indexes that reference facts.registry_name (existing DBs lack the column).
     await migrateFactsToOrgPartitionPostgres(pool);

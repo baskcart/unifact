@@ -64,7 +64,9 @@ import {
     upsertFact,
     feedbackFact,
     exportAuditLog,
-    formatAuditExportCsv
+    formatAuditExportCsv,
+    getFactAsOf,
+    listFactsAsOf
 } from './store.js';
 
 const app = express();
@@ -931,6 +933,22 @@ app.get('/v1/facts/:namespace/:key/versions', requireAuth('read'), async (req: R
     }
 });
 
+/** Point-in-time: production-lifecycle fact at timestamp T (unix ms or ISO). */
+app.get('/v1/facts/:namespace/:key/as-of', requireAuth('read'), async (req: Request, res: Response) => {
+    const { namespace, key } = req.params;
+    const at = getQueryString(req, 'at');
+    if (!at) {
+        return res.status(400).json({ error: 'Query parameter at is required (unix ms or ISO-8601)' });
+    }
+
+    try {
+        const registry = await resolveRequestRegistry(req);
+        return res.json(await getFactAsOf(registry, namespace, key, at));
+    } catch (err) {
+        return handleError(res, err, 'Failed to get fact as of timestamp');
+    }
+});
+
 app.post('/v1/facts/:namespace/:key/review', requireAuth('write'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
 
@@ -1014,7 +1032,7 @@ app.get('/v1/facts/:namespace/:key/audit', requireAuth('read'), async (req: Requ
         const registry = await resolveRequestRegistry(req);
         const logs = await db.all<AuditLogRow>(`
           SELECT id, action, registry_name, namespace, key, old_value, new_value,
-                 old_snapshot, new_snapshot, timestamp
+                 old_snapshot, new_snapshot, actor, timestamp
           FROM audit_log
           WHERE registry_name = ? AND namespace = ? AND key = ?
           ORDER BY timestamp DESC
@@ -1117,9 +1135,13 @@ app.get('/v1/ops/events', requireAuth('read'), async (req: Request, res: Respons
 app.get('/v1/facts/:namespace/:key', requireAuth('read'), async (req: Request, res: Response) => {
     const { namespace, key } = req.params;
     const format = getFormat(req);
+    const asOf = getQueryString(req, 'as_of') || getQueryString(req, 'at');
 
     try {
         const registry = await resolveRequestRegistry(req);
+        if (asOf) {
+            return res.json(await getFactAsOf(registry, namespace, key, asOf));
+        }
         const useLookup = getQueryBoolean(req, 'lookup') !== false;
         const fact = await getFactWithLookup(registry, namespace, key, { lookup: useLookup });
         if (!fact) {
@@ -1140,9 +1162,13 @@ app.get('/v1/facts/:namespace/:key', requireAuth('read'), async (req: Request, r
 app.get('/v1/facts/:namespace', requireAuth('read'), async (req: Request, res: Response) => {
     const { namespace } = req.params;
     const format = getFormat(req);
+    const asOf = getQueryString(req, 'as_of') || getQueryString(req, 'at');
 
     try {
         const registry = await resolveRequestRegistry(req);
+        if (asOf) {
+            return res.json(await listFactsAsOf(registry, namespace, asOf));
+        }
         const useLookup = getQueryBoolean(req, 'lookup') !== false;
         const registryChannel = getQueryString(req, 'registry_channel');
         let facts = await listFactsWithLookup(registry, namespace, { lookup: useLookup });

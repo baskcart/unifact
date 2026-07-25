@@ -43,9 +43,12 @@ import {
     upsertAgentProfile,
     upsertFact,
     feedbackFact,
-    exportAuditLog
+    exportAuditLog,
+    getFactAsOf,
+    listFactsAsOf
 } from './store.js';
 import { extractFactCandidates } from './extract.js';
+import { pickAsOfArg } from './as-of.js';
 import { readFileSync } from 'fs';
 import { resolve as resolvePath } from 'path';
 import {
@@ -78,6 +81,17 @@ const server = new McpServer(
         instructions: UNIFACT_MCP_INSTRUCTIONS
     }
 );
+
+const optionalAsOfFields = {
+    at: z
+        .union([z.number(), z.string()])
+        .optional()
+        .describe('Point in time: unix milliseconds or ISO-8601 datetime (alias of as_of)'),
+    as_of: z
+        .union([z.number(), z.string()])
+        .optional()
+        .describe('Point in time: unix milliseconds or ISO-8601 datetime (preferred over at)')
+};
 
 const optionalRegistryField = {
     registry: z.string().min(1).optional().describe('Org registry name; must match membership if provided')
@@ -112,8 +126,12 @@ const factMetadataSchema = {
     status: z.enum(FACT_STATUSES).optional().describe('Fact lifecycle status'),
     derivation: z.enum(FACT_DERIVATIONS).optional().describe('Whether the fact is asserted, observed, or derived'),
     confidence: z.number().min(0).max(1).nullable().optional().describe('Confidence from 0 to 1'),
-    source: z.string().nullable().optional().describe('Source system, document, ticket, report, conversation, or agent'),
-    evidence: z.any().optional().describe('Evidence payload or links backing the fact'),
+    source: z.string().nullable().optional().describe(
+        'Provenance source (required when UNIFACT_REQUIRE_PROVENANCE / UNIFACT_REQUIRE_PROVENANCE_NAMESPACES applies). Examples: ticket id, doc path, "founder-decision", agent id.'
+    ),
+    evidence: z.any().optional().describe(
+        'Structured evidence when available: { url?, ticket?, conversation_id?, refs?, note? }, an array of those, or a string. Prefer links/tickets over opaque prose.'
+    ),
     valid_from: z.union([z.number(), z.string()]).nullable().optional().describe('When the fact starts applying'),
     valid_until: z.union([z.number(), z.string()]).nullable().optional().describe('When the fact stops applying'),
     observed_at: z.union([z.number(), z.string()]).nullable().optional().describe('When the fact was observed'),
@@ -271,18 +289,23 @@ server.registerTool('approve_registry_join', {
 
 server.registerTool('list_facts', {
     description:
-        'List governed organizational facts in a namespace. Resolves local → parent namespaces (implicit dotted hierarchy) → explicit lookups (published, read-only). Includes provenance, lifecycle, and freshness metadata.',
+        'List governed organizational facts in a namespace. Resolves local → parent namespaces (implicit dotted hierarchy) → explicit lookups (published, read-only). Includes provenance, lifecycle, and freshness metadata. Pass optional at/as_of for point-in-time (production lifecycle only; same as list_facts_as_of).',
     inputSchema: {
         namespace: z.string().min(1).describe('Namespace to list, for example company.decisions'),
         lookup: z
             .boolean()
             .optional()
-            .describe('Include parent namespaces and explicit lookups (default true).'),
+            .describe('Include parent namespaces and explicit lookups (default true). Ignored when at/as_of is set.'),
+        ...optionalAsOfFields,
         ...optionalRegistryField
     }
-}, async ({ namespace, registry: registryArg, lookup }) => {
+}, async ({ namespace, registry: registryArg, lookup, at, as_of }) => {
     try {
         const registry = await resolveToolRegistry(registryArg);
+        const pointInTime = pickAsOfArg({ at, as_of });
+        if (pointInTime !== undefined) {
+            return toolResult(await listFactsAsOf(registry, namespace, pointInTime));
+        }
         const facts = await listFactsWithLookup(registry, namespace, { lookup: lookup !== false });
         const lookups = lookup === false ? [] : await listNamespaceLookups(registry, namespace);
         return toolResult({
@@ -299,16 +322,21 @@ server.registerTool('list_facts', {
 
 server.registerTool('get_fact', {
     description:
-        'Get one governed organizational fact by namespace and key. Resolves local → parent namespaces → explicit lookups. Parent/lookup hits have writable: false. Includes provenance and lifecycle metadata.',
+        'Get one governed organizational fact by namespace and key. Resolves local → parent namespaces → explicit lookups. Parent/lookup hits have writable: false. Includes provenance and lifecycle metadata. Pass optional at/as_of for point-in-time (same as get_fact_as_of).',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
-        lookup: z.boolean().optional().describe('Include parent namespaces and explicit lookups (default true)'),
+        lookup: z.boolean().optional().describe('Include parent namespaces and explicit lookups (default true). Ignored when at/as_of is set.'),
+        ...optionalAsOfFields,
         ...optionalRegistryField
     }
-}, async ({ namespace, key, registry: registryArg, lookup }) => {
+}, async ({ namespace, key, registry: registryArg, lookup, at, as_of }) => {
     try {
         const registry = await resolveToolRegistry(registryArg);
+        const pointInTime = pickAsOfArg({ at, as_of });
+        if (pointInTime !== undefined) {
+            return toolResult(await getFactAsOf(registry, namespace, key, pointInTime));
+        }
         const fact = await getFactWithLookup(registry, namespace, key, { lookup: lookup !== false });
 
         if (!fact) {
@@ -316,6 +344,41 @@ server.registerTool('get_fact', {
         }
 
         return toolResult({ fact });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('get_fact_as_of', {
+    description:
+        'Alias of get_fact with required at. Point-in-time query: reconstruct the production-lifecycle fact (published / superseded / retracted) at timestamp T from fact_versions. Returns found=false if never published by T.',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key'),
+        at: z.union([z.number(), z.string()]).describe('Point in time: unix milliseconds or ISO-8601 datetime'),
+        ...optionalRegistryField
+    }
+}, async ({ namespace, key, at, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await getFactAsOf(registry, namespace, key, at));
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('list_facts_as_of', {
+    description:
+        'Alias of list_facts with required at. List facts in a namespace as they stood at timestamp T (production-lifecycle versions only). Omits keys never published by T.',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Namespace to list'),
+        at: z.union([z.number(), z.string()]).describe('Point in time: unix milliseconds or ISO-8601 datetime'),
+        ...optionalRegistryField
+    }
+}, async ({ namespace, at, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        return toolResult(await listFactsAsOf(registry, namespace, at));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -401,7 +464,8 @@ server.registerTool('pull_facts_for_agent', {
     }
 });
 server.registerTool('upsert_fact', {
-    description: 'Create or update a fact with optional categorization, provenance, freshness, and actionability metadata',
+    description:
+        'Create or update a fact with categorization, provenance (source + structured evidence), freshness, and actionability. Prefer source/evidence; validated when provenance policy applies.',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
@@ -422,7 +486,8 @@ server.registerTool('upsert_fact', {
 });
 
 server.registerTool('propose_fact', {
-    description: 'Create or update a fact through an agent profile, enforcing that profile\'s write permissions and review defaults',
+    description:
+        'Create or update a fact through an agent profile, enforcing that profile\'s write permissions and review defaults. Prefer non-empty source and structured evidence ({ url, ticket, conversation_id }). When provenance policy applies, source is validated.',
     inputSchema: {
         profile_id: z.string().min(1).describe('Agent profile proposing the fact'),
         namespace: z.string().min(1).describe('Fact namespace'),
@@ -636,7 +701,7 @@ server.registerTool('delete_fact', {
 });
 
 server.registerTool('audit_fact', {
-    description: 'Get audit history for one fact, including metadata snapshots when available',
+    description: 'Get audit history for one fact, including actor (who) and metadata snapshots when available',
     inputSchema: {
         namespace: z.string().min(1).describe('Fact namespace'),
         key: z.string().min(1).describe('Fact key'),
@@ -647,7 +712,7 @@ server.registerTool('audit_fact', {
         const registry = await resolveToolRegistry(registryArg);
         const rows = await db.all<AuditLogRow>(`
           SELECT id, action, registry_name, namespace, key, old_value, new_value,
-                 old_snapshot, new_snapshot, timestamp
+                 old_snapshot, new_snapshot, actor, timestamp
           FROM audit_log
           WHERE registry_name = ? AND namespace = ? AND key = ?
           ORDER BY timestamp DESC
@@ -660,7 +725,8 @@ server.registerTool('audit_fact', {
 });
 
 server.registerTool('export_audit_log', {
-    description: 'Export org audit log (who changed which facts). Compliance handoff; JSON rows.',
+    description:
+        'Export org audit log with actor (who changed which facts), action, namespace/key, values, and timestamps. Compliance handoff; JSON rows (also via uni audit).',
     inputSchema: {
         limit: z.number().int().min(1).max(5000).optional().describe('Max rows (default 500)'),
         since: z.number().int().optional().describe('Only entries at or after this unix ms timestamp'),

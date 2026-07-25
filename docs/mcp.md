@@ -8,7 +8,9 @@ Stdio MCP server (`unifact-mcp`, `npm run mcp`, or `dist/mcp.js`) exposes tools 
 
 - `sync_pull` / `sync_push` / `sync_status`
 - `list_facts` / `get_fact` / `search_facts` / `find_relevant_facts`
-- `propose_fact` / `upsert_fact` / `publish_fact` / `feedback_fact`
+- Optional `at` / `as_of` on `get_fact` and `list_facts` for point-in-time (production lifecycle); `get_fact_as_of` / `list_facts_as_of` are aliases with required `at`
+- `propose_fact` / `upsert_fact` / `publish_fact` / `feedback_fact` — prefer `source` + structured `evidence`
+- `audit_fact` / `export_audit_log` — history and org export including **actor**
 - `extract_facts_from_document` (heuristic; product demos may use Bedrock separately)
 - `fact_check` prompt for a read-first grounding workflow
 - `registry_status` / `request_registry_join` for no-command-line onboarding
@@ -104,6 +106,7 @@ If the product supports MCP stdio servers, use the same command. If it only supp
 4. Prefer published facts and label non-published lifecycle states as context.
 5. Do not invent policy when no fact exists.
 6. Propose only with user approval. Publishing and destructive lifecycle actions require explicit authorization.
+7. When proposing, set `source` and structured `evidence` (`url` / `ticket` / `conversation_id`) so later audits can challenge the claim. Use `get_fact` with `at`/`as_of` (or alias `get_fact_as_of`) when you need what was published at time T.
 
 ## Related facts (when published)
 

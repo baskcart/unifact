@@ -31,6 +31,9 @@ import { apiKeyAllowsNamespace, findApiKeyBySecret, listApiKeys } from './keys.j
 import { assertCanWriteRegistry } from './registry.js';
 import { namespaceChain } from './namespaces.js';
 import { assertNamespaceNameAvailable } from './naming.js';
+import { assertProvenance, normalizeEvidence } from './provenance.js';
+import { buildFactAsOfResult, type FactAsOfResult } from './as-of.js';
+export type { FactAsOfResult } from './as-of.js';
 
 export const FACT_SELECT_COLUMNS = `
   rowid, registry_name, namespace, key, value, description, fact_type, subject, scope, status,
@@ -183,7 +186,9 @@ function buildFactColumns(input: InputRecord, existing?: FactRow): FactColumns {
             : existing?.derivation ?? 'asserted',
         confidence: hasOwn(input, 'confidence') ? normalizeConfidence(input.confidence) : existing?.confidence ?? null,
         source: maybeString(input, 'source', existing?.source),
-        evidence: hasOwn(input, 'evidence') ? serializeJsonPayload(input.evidence, 'evidence') : existing?.evidence ?? null,
+        evidence: hasOwn(input, 'evidence')
+            ? serializeJsonPayload(normalizeEvidence(input.evidence), 'evidence')
+            : existing?.evidence ?? null,
         valid_from: maybeTimestamp(input, 'valid_from', existing?.valid_from),
         valid_until: maybeTimestamp(input, 'valid_until', existing?.valid_until),
         observed_at: maybeTimestamp(input, 'observed_at', existing?.observed_at),
@@ -409,6 +414,62 @@ export async function listFactVersions(registryName: string, namespace: string, 
     return rows.map(factVersionFromRow);
 }
 
+/**
+ * What was the production-lifecycle fact at timestamp T?
+ * Latest fact_versions row with created_at <= T and channel in published|superseded|retracted.
+ * Retracted/superseded at T are returned as-is (as_of_status reflects that).
+ */
+export async function getFactAsOf(
+    registryName: string,
+    namespace: string,
+    key: string,
+    at: unknown
+): Promise<FactAsOfResult> {
+    const versions = await listFactVersions(registryName, namespace, key);
+    return buildFactAsOfResult(versions, at, {
+        registry_name: registryName,
+        namespace,
+        key
+    });
+}
+
+/**
+ * List facts in a namespace as they stood at T (production-lifecycle only).
+ * Keys with no published/superseded/retracted version by T are omitted.
+ */
+export async function listFactsAsOf(
+    registryName: string,
+    namespace: string,
+    at: unknown
+): Promise<{ at: number; at_iso: string; namespace: string; facts: FactAsOfResult[]; count: number }> {
+    const keys = await db.all<{ key: string }>(`
+      SELECT DISTINCT key
+      FROM fact_versions
+      WHERE registry_name = ? AND namespace = ?
+      ORDER BY key
+    `, [registryName, namespace]);
+
+    const facts: FactAsOfResult[] = [];
+    let atMs = 0;
+    let atIso = '';
+    for (const { key } of keys) {
+        const result = await getFactAsOf(registryName, namespace, key, at);
+        atMs = result.at;
+        atIso = result.at_iso;
+        if (result.found) {
+            facts.push(result);
+        }
+    }
+
+    if (!atIso) {
+        const parsed = buildFactAsOfResult([], at);
+        atMs = parsed.at;
+        atIso = parsed.at_iso;
+    }
+
+    return { at: atMs, at_iso: atIso, namespace, facts, count: facts.length };
+}
+
 export async function upsertFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const storedValue = serializeValue(input.value);
     const now = Date.now();
@@ -433,6 +494,15 @@ export async function upsertFact(registryName: string, namespace: string, key: s
     const event = requestedVersionEvent(input, action);
     const nextVersion = existing ? existing.version + 1 : 1;
     const oldSnapshot = existing ? JSON.stringify(factFromRow(existing)) : null;
+    const actor = versionAuthor(columns);
+    const forPublish = columns.registry_channel === 'published' || event === 'publish';
+    assertProvenance({
+        namespace,
+        source: columns.source,
+        evidence: parseJsonPayload(columns.evidence),
+        change_reason: columns.change_reason,
+        forPublish
+    });
 
     const saved = await db.transaction(async () => {
         if (existing) {
@@ -542,9 +612,9 @@ export async function upsertFact(registryName: string, namespace: string, key: s
         await db.run(`
           INSERT INTO audit_log (
             action, registry_name, namespace, key, old_value, new_value, old_snapshot,
-            new_snapshot, timestamp
+            new_snapshot, actor, timestamp
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
             action,
             registryName,
@@ -554,10 +624,11 @@ export async function upsertFact(registryName: string, namespace: string, key: s
             storedValue,
             oldSnapshot,
             JSON.stringify(factFromRow(savedRow)),
+            actor,
             now
         ]);
 
-        await recordFactVersion(savedRow, event, versionAuthor(columns), columns.change_reason, now);
+        await recordFactVersion(savedRow, event, actor, columns.change_reason, now);
         return savedRow;
     });
 
@@ -575,16 +646,17 @@ export async function deleteFact(registryName: string, namespace: string, key: s
     }
 
     const now = Date.now();
+    const deleteActor = existing.published_by ?? existing.approved_by ?? existing.created_by;
     await db.transaction(async () => {
-        await recordFactVersion(existing, 'delete', existing.created_by, existing.change_reason, now);
+        await recordFactVersion(existing, 'delete', deleteActor, existing.change_reason, now);
         await db.run('DELETE FROM facts WHERE registry_name = ? AND namespace = ? AND key = ?', [registryName, namespace, key]);
         await db.run(`
           INSERT INTO audit_log (
             action, registry_name, namespace, key, old_value, new_value, old_snapshot,
-            new_snapshot, timestamp
+            new_snapshot, actor, timestamp
           )
-          VALUES ('DELETE', ?, ?, ?, ?, NULL, ?, NULL, ?)
-        `, [registryName, namespace, key, existing.value, JSON.stringify(factFromRow(existing)), now]);
+          VALUES ('DELETE', ?, ?, ?, ?, NULL, ?, NULL, ?, ?)
+        `, [registryName, namespace, key, existing.value, JSON.stringify(factFromRow(existing)), deleteActor, now]);
     });
 
     return true;
@@ -1135,6 +1207,19 @@ export async function reviewFact(registryName: string, namespace: string, key: s
 export async function publishFact(registryName: string, namespace: string, key: string, input: InputRecord): Promise<UpsertFactResult> {
     const now = Date.now();
     const publisher = normalizeNullableString(input.published_by ?? input.approved_by, 'published_by');
+    const existing = await getFactRow(registryName, namespace, key);
+    if (!existing) {
+        throw new Error(`Fact '${key}' not found in namespace '${namespace}'`);
+    }
+    assertProvenance({
+        namespace,
+        source: hasOwn(input, 'source') ? normalizeNullableString(input.source, 'source') : existing.source,
+        evidence: hasOwn(input, 'evidence') ? normalizeEvidence(input.evidence) : parseJsonPayload(existing.evidence),
+        change_reason: hasOwn(input, 'change_reason')
+            ? normalizeNullableString(input.change_reason, 'change_reason')
+            : existing.change_reason,
+        forPublish: true
+    });
 
     return transitionFact(registryName, namespace, key, {
         ...input,
@@ -1760,6 +1845,8 @@ export interface AuditExportRow {
     key: string;
     old_value: string | null;
     new_value: string | null;
+    /** Who changed the fact (person / agent / system), when known. */
+    actor: string | null;
     timestamp: number;
     timestamp_iso: string;
 }
@@ -1774,7 +1861,7 @@ export async function exportAuditLog(
         ? await db.all<AuditLogRow>(
               `
           SELECT id, action, registry_name, namespace, key, old_value, new_value,
-                 old_snapshot, new_snapshot, timestamp
+                 old_snapshot, new_snapshot, actor, timestamp
           FROM audit_log
           WHERE registry_name = ? AND timestamp >= ?
           ORDER BY timestamp DESC
@@ -1785,7 +1872,7 @@ export async function exportAuditLog(
         : await db.all<AuditLogRow>(
               `
           SELECT id, action, registry_name, namespace, key, old_value, new_value,
-                 old_snapshot, new_snapshot, timestamp
+                 old_snapshot, new_snapshot, actor, timestamp
           FROM audit_log
           WHERE registry_name = ?
           ORDER BY timestamp DESC
@@ -1802,6 +1889,7 @@ export async function exportAuditLog(
         key: row.key,
         old_value: row.old_value,
         new_value: row.new_value,
+        actor: row.actor ?? null,
         timestamp: row.timestamp,
         timestamp_iso: new Date(row.timestamp).toISOString()
     }));
@@ -1816,6 +1904,7 @@ export function formatAuditExportCsv(rows: AuditExportRow[]): string {
         'key',
         'old_value',
         'new_value',
+        'actor',
         'timestamp',
         'timestamp_iso'
     ];
@@ -1835,6 +1924,7 @@ export function formatAuditExportCsv(rows: AuditExportRow[]): string {
                 row.key,
                 row.old_value,
                 row.new_value,
+                row.actor,
                 row.timestamp,
                 row.timestamp_iso
             ]

@@ -32,6 +32,8 @@ import {
 import {
     addNamespaceLookup,
     describeLookupResolution,
+    getFactWithLookup,
+    listFactsWithLookup,
     listNamespaceLookups,
     removeNamespaceLookup
 } from './lookup.js';
@@ -50,8 +52,12 @@ import {
     pushFactsToRemote,
     upsertFact,
     exportAuditLog,
-    formatAuditExportCsv
+    formatAuditExportCsv,
+    getFactAsOf,
+    listFactsAsOf
 } from './store.js';
+import { checkProvenance } from './provenance.js';
+import { parseJsonPayload } from './model.js';
 import { listOpsEvents, type OpsEventKind } from './ops.js';
 
 const command = process.argv[2];
@@ -111,6 +117,16 @@ async function main() {
         case 'facts':
             await factsCommand(args);
             break;
+        case 'get':
+            await getCommand(args);
+            break;
+        case 'list':
+            await listCommand(args);
+            break;
+        case 'as-of':
+            // Alias for `uni get <ns/key> --at …`
+            await asOfCommand(args);
+            break;
         case 'audit':
             await auditCommand(args);
             break;
@@ -163,8 +179,11 @@ function printHelp() {
     console.log('  suspend <Registry> <member>      # you (owner) pause member');
     console.log('  team [Registry]                  # your registries only');
     console.log('  facts [Registry]                 # list facts (+ parent ns / lookups)');
+    console.log('  get <namespace/key> [--at <iso|ms>]  # one fact (optional point-in-time)');
+    console.log('  list <namespace> [--at <iso|ms>]     # namespace facts (optional point-in-time)');
+    console.log('  as-of <namespace/key> --at <iso|ms>  # alias for get --at');
     console.log('  extract <file.md> [--dry-run]    # doc → proposed facts (never auto-publish)');
-    console.log('  audit [--format json|csv]        # export org audit log');
+    console.log('  audit [--format json|csv]        # export org audit log (includes actor)');
     console.log('  ops events [--kind error|call] [--registry name]  # list ops_events');
     console.log('  registries                       # registries you own or belong to');
     console.log('');
@@ -561,6 +580,23 @@ async function publishCommand(argv: string[]) {
                 } else {
                     console.error(`Allowed sources: ${allowed.join(', ')}`);
                 }
+                process.exit(1);
+            }
+            const provenance = checkProvenance({
+                namespace,
+                source: existing.source,
+                evidence: parseJsonPayload(existing.evidence),
+                change_reason: 'uni publish',
+                forPublish: true
+            });
+            for (const warning of provenance.warnings) {
+                console.warn(`Provenance warning ${namespace}/${key}: ${warning}`);
+            }
+            if (!provenance.ok) {
+                console.error(`Cannot publish ${namespace}/${key}: ${provenance.errors.join('; ')}`);
+                console.error(
+                    'Set source (and evidence) on the fact, or adjust UNIFACT_REQUIRE_PROVENANCE / UNIFACT_PROVENANCE_MODE=warn'
+                );
                 process.exit(1);
             }
             const result = await publishFact(registry, namespace, key, {
@@ -1250,6 +1286,67 @@ async function auditCommand(argv: string[]) {
         console.error('Audit failed:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
+}
+
+async function getCommand(argv: string[]) {
+    try {
+        const pathArg = positionalArgs(argv)[0];
+        const at = parseFlag(argv, '--at');
+        if (!pathArg) {
+            console.error('Usage: uni get <namespace/key> [--at <iso|unix-ms>]');
+            process.exit(1);
+        }
+        const { namespace, key } = parseFactPath(pathArg);
+        const registry = await resolveWorkingRegistry();
+        if (at) {
+            const result = await getFactAsOf(registry, namespace, key, at);
+            console.log(JSON.stringify({ registry, ...result }, null, 2));
+            if (!result.found) {
+                process.exitCode = 2;
+            }
+            return;
+        }
+        const fact = await getFactWithLookup(registry, namespace, key);
+        if (!fact) {
+            console.error(`Fact '${key}' not found in namespace '${namespace}'`);
+            process.exit(1);
+        }
+        console.log(JSON.stringify({ registry, fact }, null, 2));
+    } catch (error) {
+        console.error('get failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function listCommand(argv: string[]) {
+    try {
+        const namespace = positionalArgs(argv)[0];
+        const at = parseFlag(argv, '--at');
+        if (!namespace) {
+            console.error('Usage: uni list <namespace> [--at <iso|unix-ms>]');
+            process.exit(1);
+        }
+        const registry = await resolveWorkingRegistry();
+        if (at) {
+            const result = await listFactsAsOf(registry, namespace, at);
+            console.log(JSON.stringify({ registry, ...result }, null, 2));
+            return;
+        }
+        const facts = await listFactsWithLookup(registry, namespace);
+        console.log(JSON.stringify({ registry, namespace, facts, count: facts.length }, null, 2));
+    } catch (error) {
+        console.error('list failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+/** Alias for `uni get … --at …` (requires --at). */
+async function asOfCommand(argv: string[]) {
+    if (!positionalArgs(argv)[0] || !parseFlag(argv, '--at')) {
+        console.error('Usage: uni as-of <namespace/key> --at <iso|unix-ms>');
+        process.exit(1);
+    }
+    await getCommand(argv);
 }
 
 async function opsCommand(argv: string[]) {

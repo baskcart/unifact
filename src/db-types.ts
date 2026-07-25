@@ -67,6 +67,8 @@ export interface AuditLogRow {
     new_value: string | null;
     old_snapshot: string | null;
     new_snapshot: string | null;
+    /** Person / agent / system that performed the change (when known). */
+    actor: string | null;
     timestamp: number;
 }
 

@@ -33,6 +33,42 @@ function ensureColumns(sqlite: Database.Database, table: string, columns: { name
     }
 }
 
+/** Fill audit_log.actor from snapshots / matching fact_versions when missing. */
+function backfillAuditActorsSqlite(sqlite: Database.Database) {
+    try {
+        sqlite.exec(`
+          UPDATE audit_log
+          SET actor = COALESCE(
+            NULLIF(trim(json_extract(new_snapshot, '$.published_by')), ''),
+            NULLIF(trim(json_extract(new_snapshot, '$.approved_by')), ''),
+            NULLIF(trim(json_extract(new_snapshot, '$.created_by')), ''),
+            (
+              SELECT fv.author FROM fact_versions fv
+              WHERE fv.registry_name = audit_log.registry_name
+                AND fv.namespace = audit_log.namespace
+                AND fv.key = audit_log.key
+                AND fv.created_at = audit_log.timestamp
+                AND fv.author IS NOT NULL AND trim(fv.author) != ''
+              ORDER BY fv.id DESC
+              LIMIT 1
+            ),
+            (
+              SELECT fv.author FROM fact_versions fv
+              WHERE fv.registry_name = audit_log.registry_name
+                AND fv.namespace = audit_log.namespace
+                AND fv.key = audit_log.key
+                AND fv.author IS NOT NULL AND trim(fv.author) != ''
+              ORDER BY ABS(fv.created_at - audit_log.timestamp) ASC, fv.id DESC
+              LIMIT 1
+            )
+          )
+          WHERE actor IS NULL OR trim(actor) = ''
+        `);
+    } catch (err) {
+        console.error('[unifact] audit actor backfill skipped:', err instanceof Error ? err.message : err);
+    }
+}
+
 /** Move orphan `local` rows when `local` is not a real registry (failed first backfill). */
 function repairOrphanLocalRegistry(sqlite: Database.Database) {
     const localIsRegistry = sqlite
@@ -208,6 +244,7 @@ function initializeSchema(sqlite: Database.Database) {
         new_value TEXT,
         old_snapshot TEXT,
         new_snapshot TEXT,
+        actor TEXT,
         timestamp INTEGER NOT NULL
       );
 
@@ -349,8 +386,11 @@ function initializeSchema(sqlite: Database.Database) {
     ensureColumns(sqlite, 'audit_log', [
         { name: 'registry_name', definition: "TEXT NOT NULL DEFAULT 'local'" },
         { name: 'old_snapshot', definition: 'TEXT' },
-        { name: 'new_snapshot', definition: 'TEXT' }
+        { name: 'new_snapshot', definition: 'TEXT' },
+        { name: 'actor', definition: 'TEXT' }
     ]);
+
+    backfillAuditActorsSqlite(sqlite);
 
     ensureColumns(sqlite, 'fact_versions', [
         { name: 'registry_name', definition: "TEXT NOT NULL DEFAULT 'local'" }

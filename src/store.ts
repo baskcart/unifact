@@ -414,6 +414,21 @@ export async function listFactVersions(registryName: string, namespace: string, 
     return rows.map(factVersionFromRow);
 }
 
+/** Audit log rows for one fact (newest first). Same source as MCP `audit_fact` / API audit. */
+export async function listFactAudit(
+    registryName: string,
+    namespace: string,
+    key: string
+): Promise<AuditLogRow[]> {
+    return db.all<AuditLogRow>(`
+      SELECT id, action, registry_name, namespace, key, old_value, new_value,
+             old_snapshot, new_snapshot, actor, timestamp
+      FROM audit_log
+      WHERE registry_name = ? AND namespace = ? AND key = ?
+      ORDER BY timestamp DESC
+    `, [registryName, namespace, key]);
+}
+
 /**
  * What was the production-lifecycle fact at timestamp T?
  * Latest fact_versions row with created_at <= T and channel in published|superseded|retracted.

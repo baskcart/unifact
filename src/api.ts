@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express, { Request, Response } from 'express';
-import { db, AuditLogRow } from './db.js';
+import { db } from './db.js';
 import { formatFacts, FormatType, FactData } from './format.js';
 import { requireAuth, requireAuthOrBootstrap, allowPublicOrgCreate, hasAccess } from './auth.js';
 import { unifactDiscoveryDocument } from './discovery.js';
@@ -50,6 +50,7 @@ import {
     getSyncStatus,
     listAgentProfiles,
     listFactVersions,
+    listFactAudit,
     listReviewQueue,
     proposeFactFromProfile,
     publishFact,
@@ -1030,13 +1031,7 @@ app.get('/v1/facts/:namespace/:key/audit', requireAuth('read'), async (req: Requ
 
     try {
         const registry = await resolveRequestRegistry(req);
-        const logs = await db.all<AuditLogRow>(`
-          SELECT id, action, registry_name, namespace, key, old_value, new_value,
-                 old_snapshot, new_snapshot, actor, timestamp
-          FROM audit_log
-          WHERE registry_name = ? AND namespace = ? AND key = ?
-          ORDER BY timestamp DESC
-        `, [registry, namespace, key]);
+        const logs = await listFactAudit(registry, namespace, key);
 
         return res.json({
             namespace,

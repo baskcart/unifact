@@ -54,8 +54,15 @@ import {
     exportAuditLog,
     formatAuditExportCsv,
     getFactAsOf,
-    listFactsAsOf
+    listFactsAsOf,
+    listFactVersions,
+    listFactAudit
 } from './store.js';
+import {
+    compactAuditRows,
+    formatHistoryAuditLines,
+    formatHistoryVersionLines
+} from './history-format.js';
 import { checkProvenance } from './provenance.js';
 import { parseJsonPayload } from './model.js';
 import { listOpsEvents, type OpsEventKind } from './ops.js';
@@ -127,6 +134,9 @@ async function main() {
             // Alias for `uni get <ns/key> --at …`
             await asOfCommand(args);
             break;
+        case 'history':
+            await historyCommand(args);
+            break;
         case 'audit':
             await auditCommand(args);
             break;
@@ -182,6 +192,8 @@ function printHelp() {
     console.log('  get <namespace/key> [--at <iso|ms>]  # one fact (optional point-in-time)');
     console.log('  list <namespace> [--at <iso|ms>]     # namespace facts (optional point-in-time)');
     console.log('  as-of <namespace/key> --at <iso|ms>  # alias for get --at');
+    console.log('  history <namespace/key> [--audit|--all] [--json] [--verbose]');
+    console.log('      → lifecycle versions (default), audit diffs (--audit), or both (--all)');
     console.log('  extract <file.md> [--dry-run]    # doc → proposed facts (never auto-publish)');
     console.log('  audit [--format json|csv]        # export org audit log (includes actor)');
     console.log('  ops events [--kind error|call] [--registry name]  # list ops_events');
@@ -237,7 +249,15 @@ function hasFlag(argv: string[], name: string): boolean {
     return argv.includes(name);
 }
 
-const BOOLEAN_FLAGS = new Set(['--all', '--publish', '--pull', '--dry-run']);
+const BOOLEAN_FLAGS = new Set([
+    '--all',
+    '--publish',
+    '--pull',
+    '--dry-run',
+    '--audit',
+    '--json',
+    '--verbose'
+]);
 
 function positionalArgs(argv: string[]): string[] {
     const out: string[] = [];
@@ -1268,6 +1288,70 @@ function truncateFactValue(value: unknown, max = 72): string {
     if (!text) return '';
     const oneLine = text.replace(/\s+/g, ' ').trim();
     return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+/**
+ * uni history <namespace/key>           # compact lifecycle versions
+ * uni history <namespace/key> --audit   # compact audit diffs
+ * uni history <namespace/key> --all     # both sections
+ */
+async function historyCommand(argv: string[]) {
+    try {
+        const pathArg = positionalArgs(argv)[0];
+        if (!pathArg) {
+            console.error('Usage: uni history <namespace/key> [--audit|--all] [--json] [--verbose]');
+            process.exit(1);
+        }
+        const { namespace, key } = parseFactPath(pathArg);
+        const registry = await resolveWorkingRegistry();
+        const wantAll = hasFlag(argv, '--all');
+        const wantAudit = wantAll || hasFlag(argv, '--audit');
+        const wantHistory = wantAll || !hasFlag(argv, '--audit');
+        const asJson = hasFlag(argv, '--json');
+        const verbose = hasFlag(argv, '--verbose');
+
+        const versions = wantHistory ? await listFactVersions(registry, namespace, key) : [];
+        const auditRows = wantAudit ? await listFactAudit(registry, namespace, key) : [];
+
+        if (asJson) {
+            const payload: Record<string, unknown> = {
+                registry,
+                namespace,
+                key,
+                mode: wantAll ? 'all' : wantAudit && !wantHistory ? 'audit' : 'history'
+            };
+            if (wantHistory) payload.versions = versions;
+            if (wantAudit) payload.audit = compactAuditRows(auditRows, verbose);
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+
+        console.log(`${namespace}/${key}`);
+        if (wantHistory) {
+            if (wantAll) console.log('History:');
+            const lines = formatHistoryVersionLines(versions);
+            if (lines.length === 0) {
+                console.log('(no versions)');
+            } else {
+                for (const line of lines) console.log(line);
+            }
+        }
+        if (wantAudit) {
+            if (wantAll) {
+                console.log('');
+                console.log('Audit:');
+            }
+            const lines = formatHistoryAuditLines(auditRows, verbose);
+            if (lines.length === 0) {
+                console.log('(no audit entries)');
+            } else {
+                for (const line of lines) console.log(line);
+            }
+        }
+    } catch (error) {
+        console.error('History failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
 }
 
 async function auditCommand(argv: string[]) {

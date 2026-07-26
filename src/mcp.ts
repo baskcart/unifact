@@ -3,7 +3,7 @@ import 'dotenv/config';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as z from 'zod/v4';
-import { db, AuditLogRow } from './db.js';
+import { db } from './db.js';
 import { getActiveLocalApiKey } from './keys.js';
 import { getPersonMembership, requireWorkingRegistry } from './registry.js';
 import {
@@ -30,6 +30,7 @@ import {
     getSyncStatus,
     listAgentProfiles,
     listFactVersions,
+    listFactAudit,
     listReviewQueue,
     proposeFactFromProfile,
     publishFact,
@@ -47,6 +48,7 @@ import {
     getFactAsOf,
     listFactsAsOf
 } from './store.js';
+import { compactAuditRows } from './history-format.js';
 import { extractFactCandidates } from './extract.js';
 import { pickAsOfArg } from './as-of.js';
 import { readFileSync } from 'fs';
@@ -525,6 +527,43 @@ server.registerTool('list_fact_versions', {
     }
 });
 
+server.registerTool('history_fact', {
+    description:
+        'Fact lifecycle and/or compact audit for one key (same as uni history). mode=history|audit|all. Prefer over spelunking versions+audit separately when agents need a timeline.',
+    inputSchema: {
+        namespace: z.string().min(1).describe('Fact namespace'),
+        key: z.string().min(1).describe('Fact key'),
+        mode: z
+            .enum(['history', 'audit', 'all'])
+            .optional()
+            .describe('history = versions (default); audit = audit_log diffs; all = both'),
+        verbose: z
+            .boolean()
+            .optional()
+            .describe('Include full audit snapshots (default false — compact old/new values only)'),
+        ...optionalRegistryField
+    }
+}, async ({ namespace, key, mode: modeArg, verbose, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const mode = modeArg || 'history';
+        const wantHistory = mode === 'history' || mode === 'all';
+        const wantAudit = mode === 'audit' || mode === 'all';
+        const payload: Record<string, unknown> = { namespace, key, mode };
+        if (wantHistory) {
+            payload.versions = await listFactVersions(registry, namespace, key);
+        }
+        if (wantAudit) {
+            const rows = await listFactAudit(registry, namespace, key);
+            payload.audit = compactAuditRows(rows, Boolean(verbose));
+            payload.count = rows.length;
+        }
+        return toolResult(payload);
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
 server.registerTool('list_review_queue', {
     description: 'List proposed or reviewed facts waiting for curator approval',
     inputSchema: {
@@ -710,14 +749,7 @@ server.registerTool('audit_fact', {
 }, async ({ namespace, key, registry: registryArg }) => {
     try {
         const registry = await resolveToolRegistry(registryArg);
-        const rows = await db.all<AuditLogRow>(`
-          SELECT id, action, registry_name, namespace, key, old_value, new_value,
-                 old_snapshot, new_snapshot, actor, timestamp
-          FROM audit_log
-          WHERE registry_name = ? AND namespace = ? AND key = ?
-          ORDER BY timestamp DESC
-        `, [registry, namespace, key]);
-
+        const rows = await listFactAudit(registry, namespace, key);
         return toolResult({ namespace, key, history: rows, count: rows.length });
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));

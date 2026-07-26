@@ -11,6 +11,7 @@ Stdio MCP server (`unifact-mcp`, `npm run mcp`, or `dist/mcp.js`) exposes tools 
 - Optional `at` / `as_of` on `get_fact` and `list_facts` for point-in-time (production lifecycle); `get_fact_as_of` / `list_facts_as_of` are aliases with required `at`
 - `propose_fact` / `upsert_fact` / `publish_fact` / `feedback_fact` — prefer `source` + structured `evidence`
 - `audit_fact` / `export_audit_log` — history and org export including **actor**
+- `history_fact` — lifecycle versions and/or compact audit for one key (`mode`: history|audit|all; also `uni history`)
 - `extract_facts_from_document` (heuristic; product demos may use Bedrock separately)
 - `fact_check` prompt for a read-first grounding workflow
 - `registry_status` / `request_registry_join` for no-command-line onboarding

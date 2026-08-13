@@ -68,4 +68,5 @@ uni publish company.policy/return_window   # after human review
 - [Frameworks](frameworks.md)  
 - [M365 `@Uni`](integrations/m365-copilot.md)  
 - [Google Workspace `@Uni`](integrations/google-workspace.md)  
-- [Provenance](enterprise-readiness.md)
+- [Provenance](enterprise-readiness.md)  
+- **Product UI plan (unifact.ai):** see companion app repo `dahg-ai` → `docs/okf-ui-plan.md`

@@ -18,9 +18,15 @@ Example host: `https://staging.unifact.ai/.well-known/unifact.json`
 | Consumer | How |
 |----------|-----|
 | **Cursor / Claude Code/Desktop / Codex / Antigravity** | Stdio MCP and agent plugin — [`docs/mcp.md`](mcp.md) |
+| **Microsoft 365 Copilot / Teams (`@Uni`)** | Declarative agent + OpenAPI — [`docs/integrations/m365-copilot.md`](integrations/m365-copilot.md) · [`integrations/m365-copilot/`](../integrations/m365-copilot/) |
+| **Google Chat / Gemini (`@Uni`)** | Chat Apps Script + optional Drive sync — [`docs/integrations/google-workspace.md`](integrations/google-workspace.md) · [`integrations/google-workspace/`](../integrations/google-workspace/) |
 | **HTTP apps (Next.js, etc.)** | `UNIFACT_URL` + person/service key → `/v1/facts/...` |
 | **CLI** | `uni` — pull / push / propose / publish |
 | **Custom agents** | Same MCP tools or REST; Fact Check first |
+
+Suite agents share [`integrations/uni-agent/`](../integrations/uni-agent/) (instructions + OpenAPI). End users invoke **`@Uni`** — not raw MCP tool names.
+
+**OKF (Open Knowledge Format):** portable markdown knowledge bundles for exchange; UniFact remains the governed registry. Map/export/import: [`docs/okf.md`](okf.md) · `uni export --okf` · `uni import-okf`.
 
 ## Bootstrap vs facts
 

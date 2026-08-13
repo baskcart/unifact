@@ -1,0 +1,291 @@
+openapi: 3.0.3
+info:
+  title: UniFact Uni Agent API
+  description: |
+    Read and propose organizational facts for the Uni assistant (@Uni) in
+    Microsoft 365 Copilot, Copilot Studio, and Google Workspace agents.
+    Auth: X-API-Key (UniFact person key with read; write required to propose).
+  version: 0.2.0
+  contact:
+    name: UniFact
+    url: https://www.unifact.ai
+servers:
+  - url: https://staging.unifact.ai
+    description: Staging host (replace with your UniFact origin)
+  - url: https://{host}
+    description: Customer-hosted UniFact
+    variables:
+      host:
+        default: staging.unifact.ai
+paths:
+  /v1/facts/_search:
+    get:
+      operationId: searchFacts
+      summary: Search organizational facts
+      description: Full-text search across facts the API key may read. Prefer published results in agent instructions.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query from the user question
+        - name: lookup
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+          description: Include parent/lookup namespaces
+      responses:
+        '200':
+          description: Search hits
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  registry:
+                    type: string
+                  count:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Fact'
+        '401':
+          description: Missing or invalid API key
+        '400':
+          description: Missing q
+  /v1/facts/_relevant:
+    get:
+      operationId: findRelevantFacts
+      summary: Rank facts for the current task
+      description: Fact Check ranking by intent, subject, scope, and profile.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Free-text intent / question
+        - name: intent
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: subject
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: profile_id
+          in: query
+          required: false
+          schema:
+            type: string
+            default: uni-agent
+        - name: published_only
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 8
+            maximum: 25
+      responses:
+        '200':
+          description: Ranked facts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profile:
+                    type: object
+                    nullable: true
+                  count:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        score:
+                          type: number
+                        fact:
+                          $ref: '#/components/schemas/Fact'
+  /v1/facts/{namespace}/{key}:
+    get:
+      operationId: getFact
+      summary: Get one fact by namespace and key
+      parameters:
+        - $ref: '#/components/parameters/namespace'
+        - $ref: '#/components/parameters/key'
+        - name: as_of
+          in: query
+          required: false
+          schema:
+            type: string
+          description: ISO timestamp for point-in-time published truth
+        - name: lookup
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Fact found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fact:
+                    $ref: '#/components/schemas/Fact'
+        '404':
+          description: Not found
+    post:
+      operationId: upsertFact
+      summary: Create or update a fact (propose path)
+      description: |
+        Use for proposing org knowledge. Prefer registry_channel=proposed.
+        Do not publish via this operation unless the user explicitly authorized publish
+        and your key allows it — default agent keys should only write proposed.
+      parameters:
+        - $ref: '#/components/parameters/namespace'
+        - $ref: '#/components/parameters/key'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertFactBody'
+      responses:
+        '200':
+          description: Created or updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  action:
+                    type: string
+                  fact:
+                    $ref: '#/components/schemas/Fact'
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Host health check
+      security: []
+      responses:
+        '200':
+          description: OK
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: UniFact person API key (create a dedicated uniAgent person)
+  parameters:
+    namespace:
+      name: namespace
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Fact namespace (e.g. company.policy)
+    key:
+      name: key
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Fact key (e.g. return_window)
+  schemas:
+    Fact:
+      type: object
+      properties:
+        namespace:
+          type: string
+        key:
+          type: string
+        value:
+          type: string
+        description:
+          type: string
+          nullable: true
+        registry_channel:
+          type: string
+          description: published | proposed | review | feedback | superseded | retracted
+        source:
+          type: string
+          nullable: true
+        evidence:
+          nullable: true
+        created_by:
+          type: string
+          nullable: true
+        published_at:
+          nullable: true
+        updated_at:
+          nullable: true
+    UpsertFactBody:
+      type: object
+      required:
+        - value
+      properties:
+        value:
+          description: Fact value (string or JSON)
+        description:
+          type: string
+        fact_type:
+          type: string
+          enum:
+            - entity_fact
+            - state_fact
+            - insight_fact
+            - decision_fact
+            - constraint_fact
+            - preference_fact
+            - actionable_fact
+        subject:
+          type: string
+        scope:
+          type: string
+        source:
+          type: string
+        evidence:
+          description: Structured evidence object or string
+        registry_channel:
+          type: string
+          enum:
+            - working
+            - proposed
+            - review
+            - feedback
+            - published
+          default: proposed
+        created_by:
+          type: string
+          default: uni-agent
+        change_reason:
+          type: string
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+security:
+  - ApiKeyAuth: []

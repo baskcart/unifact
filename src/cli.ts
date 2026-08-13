@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import 'dotenv/config';
-import { readFileSync } from 'fs';
-import { resolve as resolvePath } from 'path';
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
+import { dirname, join, relative, resolve as resolvePath } from 'path';
 import { getMetadataFromGitUrl } from './git-metadata.js';
 import {
     createApiKey,
@@ -39,6 +39,15 @@ import {
 } from './lookup.js';
 import { sanitizeFactKey, suggestFactKey } from './suggest-key.js';
 import { extractFactCandidates } from './extract.js';
+import {
+    bundleIndexMarkdown,
+    factToOkfConcept,
+    filterFactsForOkfExport,
+    okfConceptToProposePayload,
+    parseOkfDocument,
+    relativePathForConceptId,
+    serializeOkfConcept
+} from './okf.js';
 import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
 import {
     feedbackFact,
@@ -146,6 +155,12 @@ async function main() {
         case 'extract':
             await extractCommand(args);
             break;
+        case 'export':
+            await exportCommand(args);
+            break;
+        case 'import-okf':
+            await importOkfCommand(args);
+            break;
         case 'pull':
             await pullCommand(args);
             break;
@@ -195,6 +210,10 @@ function printHelp() {
     console.log('  history <namespace/key> [--audit|--all] [--json] [--verbose]');
     console.log('      → lifecycle versions (default), audit diffs (--audit), or both (--all)');
     console.log('  extract <file.md> [--dry-run]    # doc → proposed facts (never auto-publish)');
+    console.log('  export --okf <dir> [--namespace ns[,ns…]] [--channel published]');
+    console.log('      → published facts as OKF markdown bundle (exchange / Gemini / git)');
+    console.log('  import-okf <dir|file.md> [--dry-run] [--namespace company.imported]');
+    console.log('      → OKF concepts → proposed facts only (never auto-publish)');
     console.log('  audit [--format json|csv]        # export org audit log (includes actor)');
     console.log('  ops events [--kind error|call] [--registry name]  # list ops_events');
     console.log('  registries                       # registries you own or belong to');
@@ -1455,6 +1474,172 @@ async function opsCommand(argv: string[]) {
         console.log(JSON.stringify({ registry, count: events.length, events }, null, 2));
     } catch (error) {
         console.error('Ops failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+function collectMarkdownFiles(root: string): string[] {
+    const abs = resolvePath(root);
+    const st = statSync(abs);
+    if (st.isFile()) {
+        return abs.toLowerCase().endsWith('.md') ? [abs] : [];
+    }
+    const out: string[] = [];
+    const walk = (dir: string) => {
+        for (const name of readdirSync(dir)) {
+            const p = join(dir, name);
+            const s = statSync(p);
+            if (s.isDirectory()) walk(p);
+            else if (name.toLowerCase().endsWith('.md')) out.push(p);
+        }
+    };
+    walk(abs);
+    return out.sort();
+}
+
+async function exportCommand(argv: string[]) {
+    const outDirFlag = parseFlag(argv, '--okf');
+    if (!outDirFlag) {
+        console.error('Usage: uni export --okf <dir> [--namespace ns[,ns…]] [--channel published[,…]]');
+        console.error('Exports facts as an Open Knowledge Format (OKF) markdown bundle.');
+        process.exit(1);
+    }
+    try {
+        const person = await resolvePerson(argv);
+        await assertPersonAccess(person);
+        const registry = await resolveWorkingRegistry(person);
+        const channelRaw = parseFlag(argv, '--channel') || 'published';
+        const channels = channelRaw.split(',').map((s) => s.trim()).filter(Boolean);
+        const nsRaw = parseFlag(argv, '--namespace') || parseFlag(argv, '--namespaces');
+        const namespaces = nsRaw
+            ? nsRaw.split(',').map((s) => s.trim()).filter(Boolean)
+            : undefined;
+
+        const all = await listFactsByChannels(registry, channels);
+        const facts = filterFactsForOkfExport(all, { channels, namespaces });
+        const outDir = resolvePath(outDirFlag);
+        mkdirSync(outDir, { recursive: true });
+
+        const exportedAt = new Date().toISOString();
+        writeFileSync(
+            join(outDir, 'index.md'),
+            bundleIndexMarkdown({
+                registry,
+                exportedAt,
+                conceptCount: facts.length,
+                channels
+            }),
+            'utf8'
+        );
+
+        for (const fact of facts) {
+            const concept = factToOkfConcept(fact);
+            const rel = relativePathForConceptId(concept.conceptId);
+            const filePath = join(outDir, rel);
+            mkdirSync(dirname(filePath), { recursive: true });
+            writeFileSync(filePath, serializeOkfConcept(concept), 'utf8');
+        }
+
+        console.log(`OKF export → ${outDir}`);
+        console.log(`  registry=${registry}  channels=${channels.join(',')}  concepts=${facts.length}`);
+        console.log('  index.md + unifact/<namespace>/<key>.md');
+        console.log('Import drafts only: uni import-okf ' + outDirFlag);
+    } catch (error) {
+        console.error('Export failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function importOkfCommand(argv: string[]) {
+    const target = positionalArgs(argv)[0];
+    if (!target) {
+        console.error('Usage: uni import-okf <dir|file.md> [--dry-run] [--namespace company.imported]');
+        console.error('Proposes facts from OKF concepts. Never auto-publishes.');
+        process.exit(1);
+    }
+    try {
+        const person = await resolvePerson(argv);
+        await assertPersonAccess(person);
+        const registry = await resolveWorkingRegistry(person);
+        const defaultNamespace = parseFlag(argv, '--namespace') || 'company.imported';
+        const dryRun = hasFlag(argv, '--dry-run');
+        const files = collectMarkdownFiles(target);
+        if (files.length === 0) {
+            console.error('No .md files found.');
+            process.exit(1);
+        }
+
+        const root = resolvePath(target);
+        const rootIsFile = statSync(root).isFile();
+        console.log(
+            `OKF import → ${dryRun ? 'dry-run' : 'proposed'}  registry=${registry}  from ${target}`
+        );
+
+        let proposed = 0;
+        let skipped = 0;
+        for (const file of files) {
+            const rel = rootIsFile
+                ? file.replace(/\\/g, '/').split('/').pop()!.replace(/\.md$/i, '')
+                : relative(root, file).replace(/\\/g, '/').replace(/\.md$/i, '');
+            const md = readFileSync(file, 'utf8');
+            let concept;
+            try {
+                concept = parseOkfDocument(md, rel);
+            } catch (err) {
+                console.log(`  skip ${rel}: ${err instanceof Error ? err.message : String(err)}`);
+                skipped += 1;
+                continue;
+            }
+            const payload = okfConceptToProposePayload(concept, {
+                defaultNamespace,
+                createdBy: person
+            });
+            if (!payload) {
+                skipped += 1;
+                continue;
+            }
+            if (dryRun) {
+                console.log(
+                    `  [dry-run] ${payload.namespace}/${payload.key}  type=${payload.fact_type}  from ${concept.frontmatter.type}`
+                );
+                proposed += 1;
+                continue;
+            }
+            const result = await upsertFact(registry, payload.namespace, payload.key, {
+                value: payload.value,
+                description: payload.description,
+                fact_type: payload.fact_type,
+                subject: payload.subject,
+                scope: payload.scope,
+                source: payload.source,
+                evidence: payload.evidence,
+                created_by: payload.created_by,
+                confidence: payload.confidence,
+                relevance_tags: payload.relevance_tags,
+                related_facts: payload.related_facts,
+                actionability: payload.actionability || undefined,
+                owner: payload.owner,
+                priority: payload.priority || undefined,
+                approval_status: payload.approval_status,
+                registry_channel: payload.registry_channel,
+                change_reason: payload.change_reason,
+                _event: 'propose'
+            });
+            proposed += 1;
+            console.log(`  proposed ${result.fact.namespace}/${result.fact.key}`);
+        }
+
+        console.log('');
+        console.log(
+            dryRun
+                ? `Dry-run: ${proposed} candidate(s), ${skipped} skipped.`
+                : `Proposed ${proposed} fact(s), ${skipped} skipped. Review: uni facts`
+        );
+        if (!dryRun && proposed > 0) {
+            console.log('Publish only after review: uni publish <namespace/key>');
+        }
+    } catch (error) {
+        console.error('OKF import failed:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
 }

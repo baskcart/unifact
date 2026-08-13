@@ -1,0 +1,73 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/copilot/plugin/v2.3/schema.json",
+  "schema_version": "v2.3",
+  "name_for_human": "UniFact",
+  "description_for_human": "Search and propose governed organizational facts (UniFact registry).",
+  "description_for_model": "Use these actions to Fact Check UniFact before answering organization-specific questions. Prefer searchFacts or findRelevantFacts, then getFact for exact paths. Use upsertFact only to propose (registry_channel=proposed) after user confirmation. Never invent org truth.",
+  "contact_email": "support@unifact.ai",
+  "namespace": "unifact",
+  "functions": [
+    {
+      "name": "searchFacts",
+      "description": "Search UniFact for organizational facts matching a query. Prefer published results when answering.",
+      "states": {
+        "reasoning": {
+          "description": "Searching UniFact for published org truth…",
+          "instructions": "Call searchFacts with q from the user question."
+        },
+        "responding": {
+          "description": "Citing UniFact results…",
+          "instructions": "Cite namespace/key. Label non-published channels as draft."
+        }
+      }
+    },
+    {
+      "name": "findRelevantFacts",
+      "description": "Rank UniFact records for the current task intent (Fact Check).",
+      "states": {
+        "reasoning": {
+          "description": "Finding relevant UniFacts…",
+          "instructions": "Pass q/intent/subject/scope; set published_only=true for production answers."
+        }
+      }
+    },
+    {
+      "name": "getFact",
+      "description": "Get one UniFact by namespace and key. Optional as_of for point-in-time published truth.",
+      "states": {
+        "reasoning": {
+          "description": "Loading UniFact…",
+          "instructions": "Use when the user or prior search named an exact namespace/key."
+        }
+      }
+    },
+    {
+      "name": "upsertFact",
+      "description": "Propose or update a fact. Default to registry_channel=proposed. Confirm with the user before calling. Do not publish.",
+      "states": {
+        "reasoning": {
+          "description": "Preparing a proposed UniFact…",
+          "instructions": "Only after explicit user confirmation. Set created_by=uni-agent and source/evidence."
+        }
+      }
+    }
+  ],
+  "runtimes": [
+    {
+      "type": "OpenApi",
+      "auth": {
+        "type": "ApiKeyPluginVault",
+        "reference_id": "UNIFACT_API_KEY"
+      },
+      "spec": {
+        "url": "openapi.yaml"
+      },
+      "run_for_functions": [
+        "searchFacts",
+        "findRelevantFacts",
+        "getFact",
+        "upsertFact"
+      ]
+    }
+  ]
+}

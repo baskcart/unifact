@@ -15,6 +15,9 @@ export function unifactDiscoveryDocument(baseUrl?: string | null) {
             mcp: 'https://github.com/baskcart/unifact/blob/main/docs/mcp.md',
             frameworks: 'https://github.com/baskcart/unifact/blob/main/docs/frameworks.md',
             config_as_facts: 'https://github.com/baskcart/unifact/blob/main/docs/config-as-facts.md',
+            m365_copilot: 'https://github.com/baskcart/unifact/blob/main/docs/integrations/m365-copilot.md',
+            google_workspace: 'https://github.com/baskcart/unifact/blob/main/docs/integrations/google-workspace.md',
+            okf: 'https://github.com/baskcart/unifact/blob/main/docs/okf.md',
             product: 'https://www.unifact.ai'
         },
         endpoints: {
@@ -30,7 +33,10 @@ export function unifactDiscoveryDocument(baseUrl?: string | null) {
             create_registry: 'POST /v1/registries',
             ops_events: 'GET|POST /v1/ops/events',
             fact_namespaces: 'GET /v1/facts/_namespaces',
-            mcp_stdio: 'unifact-mcp (or npm run mcp from source; see docs/mcp.md)'
+            mcp_stdio: 'unifact-mcp (or npm run mcp from source; see docs/mcp.md)',
+            uni_agent_openapi: 'integrations/uni-agent/openapi.yaml',
+            m365_uni_agent: 'integrations/m365-copilot/',
+            google_uni_agent: 'integrations/google-workspace/'
         },
         auth: {
             humans_web: 'OAuth on the product site (e.g. GitHub) → person + org; not used by work agents',

@@ -120,6 +120,8 @@ uni public <namespace> | public off <namespace> | public --registry | discover
 uni lookup | lookup add <from> <target> | lookup remove …
 uni add "<value>"
 uni extract <file.md> [--dry-run]   # → proposed only
+uni export --okf <dir>              # published → OKF markdown bundle
+uni import-okf <dir|file.md>        # OKF → proposed only (never auto-publish)
 uni publish <namespace/key> | feedback <namespace/key>
 uni get <namespace/key> [--at <iso|ms>]
 uni list <namespace> [--at <iso|ms>]
@@ -223,6 +225,9 @@ See **[docs/deploy.md](docs/deploy.md)** for running a host (Node or Docker, SQL
 | [unifact.ai](https://unifact.ai) | Product site |
 | [User guide](docs/user-guide.html) | Onboarding for everyone |
 | [MCP for work agents](docs/mcp.md) | Integrate Cursor, Claude, Codex, … |
+| [M365 Copilot `@Uni`](docs/integrations/m365-copilot.md) | Teams / Copilot Studio agent pack |
+| [Google Workspace `@Uni`](docs/integrations/google-workspace.md) | Chat app + Gemini + Drive sync |
+| [OKF (Open Knowledge Format)](docs/okf.md) | Export/import portable knowledge bundles |
 | [Frameworks](docs/frameworks.md) | Discovery, adapters, Auth.js note |
 | [Config as facts](docs/config-as-facts.md) | Env secrets vs infrastructure facts |
 | This repo | Registry engine (API, MCP, CLI) |

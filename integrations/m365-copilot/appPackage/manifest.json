@@ -1,0 +1,42 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.19/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.19",
+  "version": "0.2.0",
+  "id": "00000000-0000-0000-0000-00000000UNI1",
+  "developer": {
+    "name": "UniFact",
+    "websiteUrl": "https://www.unifact.ai",
+    "privacyUrl": "https://www.unifact.ai/privacy",
+    "termsOfUseUrl": "https://www.unifact.ai/terms"
+  },
+  "name": {
+    "short": "Uni",
+    "full": "Uni — UniFact org truth"
+  },
+  "description": {
+    "short": "Ask @Uni for published organizational facts.",
+    "full": "Uni is the UniFact assistant for Microsoft 365 Copilot and Teams. @mention Uni to Fact Check published policies, ownership, branding, and infrastructure. One Fact. One Truth. Uni proposes drafts for human review and never auto-publishes."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#4F46E5",
+  "copilotAgents": {
+    "declarativeAgents": [
+      {
+        "id": "uniDeclarativeAgent",
+        "file": "declarativeAgent.json"
+      }
+    ]
+  },
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [
+    "staging.unifact.ai",
+    "unifact.ai",
+    "www.unifact.ai"
+  ]
+}

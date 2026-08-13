@@ -63,10 +63,19 @@ uni publish company.policy/return_window   # after human review
 - `src/okf.ts` — map, serialize, parse, propose payloads  
 - Tests: `src/okf.test.ts`
 
+## Product UI (unifact.ai)
+
+OKF on the product site is **git/URL-first**:
+
+- Public explainer: `/okf`
+- Propose with optional `evidence.url` on `/facts`
+- **No** in-app zip import/export — use CLI + git
+
+Plan: companion app `dahg-ai` → `docs/okf-ui-plan.md`
+
 ## Related
 
-- [Frameworks](frameworks.md)  
-- [M365 `@Uni`](integrations/m365-copilot.md)  
-- [Google Workspace `@Uni`](integrations/google-workspace.md)  
-- [Provenance](enterprise-readiness.md)  
-- **Product UI plan (unifact.ai):** see companion app repo `dahg-ai` → `docs/okf-ui-plan.md`
+- [Frameworks](frameworks.md)
+- [M365 `@Uni`](integrations/m365-copilot.md)
+- [Google Workspace `@Uni`](integrations/google-workspace.md)
+- [Provenance](enterprise-readiness.md)

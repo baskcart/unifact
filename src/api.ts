@@ -39,6 +39,7 @@ import {
     searchFactsWithLookup
 } from './lookup.js';
 import { listOpsEvents, trackOpsEvent, type OpsEventKind } from './ops.js';
+import { CodeGraphError, listCodeGraphs } from './code-graphs.js';
 import type { ApiKeyRecord } from './keys.js';
 import {
     approveFact,
@@ -796,15 +797,46 @@ app.delete('/v1/agent-profiles/:id', requireAuth('write'), async (req: Request, 
  * so registry is explicit in the URL while handlers stay shared.
  */
 app.use((req, _res, next) => {
-    const match = req.path.match(/^\/v1\/registries\/([^/]+)\/(facts|audit|sync)(\/.*)?$/);
+    const match = req.path.match(/^\/v1\/registries\/([^/]+)\/(facts|audit|sync|code-graphs)(\/.*)?$/);
     if (!match) return next();
     const registryName = decodeURIComponent(match[1]);
     const section = match[2];
     const rest = match[3] || '';
     req.params = { ...req.params, registryName };
+    if (!req.query.registry_name) req.query.registry_name = registryName;
     const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
     req.url = `/v1/${section}${rest}${qs}`;
     return next();
+});
+
+app.get('/v1/code-graphs', requireAuth('read'), async (req: Request, res: Response) => {
+    try {
+        if (db.backend !== 'postgres') {
+            return res.status(501).json({
+                error: 'Code graphs are stored on the origin Postgres. Pull them from origin.'
+            });
+        }
+        const registry = await resolveRequestRegistry(req);
+        const at = getQueryString(req, 'at');
+        const history = getQueryBoolean(req, 'history') === true;
+        if (at && history) {
+            return res.status(400).json({ error: 'Pass at or history, not both.' });
+        }
+        const graphs = await listCodeGraphs(db, {
+            registry,
+            repo: getQueryString(req, 'repo'),
+            scanner: getQueryString(req, 'scanner'),
+            at,
+            history,
+            includeGraph: getQueryBoolean(req, 'include_graph') === true
+        });
+        return res.json({ registry_name: registry, graphs, count: graphs.length });
+    } catch (err) {
+        if (err instanceof CodeGraphError) {
+            return res.status(err.status).json({ error: err.message });
+        }
+        return handleError(res, err, 'Failed to list code graphs');
+    }
 });
 
 app.get('/v1/facts/_search', requireAuth('read'), async (req: Request, res: Response) => {
@@ -1298,8 +1330,9 @@ app.post('/v1/sync/push', requireAuth('write'), async (req: Request, res: Respon
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`UniFact fact store server active at http://localhost:${PORT}`);
+const port = Number(PORT);
+app.listen(port, '0.0.0.0', () => {
+    console.log(`UniFact fact store server active at http://0.0.0.0:${port}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`Database backend: ${db.backend} (${db.name})`);
 });

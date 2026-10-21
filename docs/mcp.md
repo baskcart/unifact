@@ -8,6 +8,9 @@ Stdio MCP server (`unifact-mcp`, `npm run mcp`, or `dist/mcp.js`) exposes tools 
 
 - `sync_pull` / `sync_push` / `sync_status`
 - `list_facts` / `get_fact` / `search_facts` / `find_relevant_facts`
+- `resolve_unispec` — before writing code, match a need such as `uuid7` to a published spec and its code locator. `use_existing` means use that code and do not create another implementation
+- `get_unispec` — published spec for `unispec <subject>/<target> [version]`; omit the version for the latest. A published code link tells the agent to use that code
+- `get_unispec_template` — company template, else shared `unispec.template/default`, else the built-in sections
 - Optional `at` / `as_of` on `get_fact` and `list_facts` for point-in-time (production lifecycle); `get_fact_as_of` / `list_facts_as_of` are aliases with required `at`
 - `propose_fact` / `upsert_fact` / `publish_fact` / `feedback_fact` — prefer `source` + structured `evidence`
 - `audit_fact` / `export_audit_log` — history and org export including **actor**

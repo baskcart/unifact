@@ -75,6 +75,28 @@ import {
 import { checkProvenance } from './provenance.js';
 import { parseJsonPayload } from './model.js';
 import { listOpsEvents, type OpsEventKind } from './ops.js';
+import { execFileSync } from 'child_process';
+import {
+    CodeGraphError,
+    publishCodeGraph,
+    readCodeGraphs,
+    type ReleaseCheckout
+} from './code-graphs.js';
+import { db } from './db.js';
+import {
+    formatSpecCall,
+    linkFactPath,
+    parseLinkValue,
+    parseUnispecInvocation,
+    resolveLink,
+    resolveSpec,
+    resolveTemplate,
+    specFactFromSnapshot,
+    specFactPath,
+    UnispecError,
+    type FactSource,
+    type SpecFact
+} from './unispec.js';
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
@@ -167,6 +189,15 @@ async function main() {
         case 'push':
             await pushCommand(args);
             break;
+        case 'code-graphs':
+            await codeGraphsCommand(args);
+            break;
+        case 'code-graph':
+            await codeGraphWriteCommand(args);
+            break;
+        case 'spec':
+            await specCommand(args);
+            break;
         case 'key':
             await keyCommand(args);
             break;
@@ -240,6 +271,16 @@ function printHelp() {
     console.log('');
     console.log('Sync:');
     console.log('  status | pull | push [selectors…]  # push = home registry only');
+    console.log('  code-graphs [--repo url] [--scanner name] [--at iso] [--history] [--include-graph]');
+    console.log('      → read release code graphs from origin (no push)');
+    console.log('  code-graph write --registry Name --scanner name --ref branch --graph file.json [--repo url]');
+    console.log('      → release job only. Uses CODE_GRAPHS_DATABASE_URL. Requires a clean release branch.');
+    console.log('  spec <subject>/<target> [version]');
+    console.log('      → published UniSpec. No version means the latest. Chat: unispec uuid7/java 3');
+    console.log('  spec template [--company acme.com]');
+    console.log('      → company template, else the shared one, else the built-in sections');
+    console.log('  spec link <subject>/<target> [version]');
+    console.log('      → published fact that links code to that spec version');
     console.log('');
     console.log('Advanced (technical):');
     console.log('  key list | key create --person <name> [--namespaces a,b] [--api-key uf_…] [--remote]');
@@ -1391,6 +1432,90 @@ async function auditCommand(argv: string[]) {
     }
 }
 
+async function specSource(registry: string): Promise<FactSource> {
+    return {
+        async get(namespace, key) {
+            const fact = await getFactWithLookup(registry, namespace, key);
+            if (!fact || typeof fact.value !== 'string') return null;
+            return {
+                namespace: fact.namespace,
+                key: fact.key,
+                version: fact.version,
+                registry_channel: fact.registry_channel,
+                value: fact.value
+            };
+        },
+        async versions(namespace, key) {
+            const rows = await listFactVersions(registry, namespace, key);
+            const facts: SpecFact[] = [];
+            for (const row of rows) {
+                const spec = specFactFromSnapshot(
+                    { namespace, key },
+                    row.version,
+                    row.registry_channel,
+                    row.snapshot
+                );
+                if (spec) facts.push(spec);
+            }
+            return facts;
+        }
+    };
+}
+
+async function specCommand(argv: string[]) {
+    const positionals = positionalArgs(argv);
+    const company = parseFlag(argv, '--company');
+    const sub = positionals[0];
+    try {
+        const registry = await resolveWorkingRegistry();
+        const source = await specSource(registry);
+        if (sub === 'template') {
+            const resolved = await resolveTemplate(source, company);
+            console.log(`template: ${resolved.path.namespace}/${resolved.path.key}`);
+            console.log(
+                resolved.builtin ? 'source: built-in' : `source: published version ${resolved.fact?.version}`
+            );
+            console.log('');
+            console.log(resolved.value);
+            return;
+        }
+        const invocation = (sub === 'link' ? positionals.slice(1) : positionals).join(' ');
+        if (!invocation) {
+            console.error('Usage: uni spec <subject>/<target> [version]');
+            console.error('       uni spec template [--company id]');
+            console.error('       uni spec link <subject>/<target> [version]');
+            process.exit(1);
+        }
+        const ref = parseUnispecInvocation(invocation);
+        if (sub === 'link') {
+            const link = await resolveLink(source, ref);
+            const path = linkFactPath(ref);
+            console.log(`${path.namespace}/${path.key}`);
+            console.log(`version: ${link.version}`);
+            console.log('');
+            console.log(link.value);
+            return;
+        }
+        const spec = await resolveSpec(source, ref);
+        const path = specFactPath(ref);
+        console.log(formatSpecCall({ ...ref, version: spec.version }));
+        console.log(`${path.namespace}/${path.key}`);
+        console.log(`version: ${spec.version}`);
+        try {
+            const code = parseLinkValue((await resolveLink(source, ref)).value).code;
+            if (code) console.log(`use existing code: ${code}`);
+        } catch {
+            console.log('No published code link. Implement this spec, then propose one link.');
+        }
+        console.log('');
+        console.log(spec.value);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(error instanceof UnispecError ? message : `spec failed: ${message}`);
+        process.exit(1);
+    }
+}
+
 async function getCommand(argv: string[]) {
     try {
         const pathArg = positionalArgs(argv)[0];
@@ -1767,6 +1892,91 @@ async function pushCommand(selectors: string[]) {
         }
     } catch (error) {
         console.error('Push failed:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+function gitOutput(args: string[]): string {
+    return execFileSync('git', args, { cwd: process.cwd(), encoding: 'utf8' }).trim();
+}
+
+function readReleaseCheckout(releaseRef: string): ReleaseCheckout {
+    try {
+        return {
+            branch: gitOutput(['rev-parse', '--abbrev-ref', 'HEAD']),
+            head: gitOutput(['rev-parse', 'HEAD']),
+            porcelain: gitOutput(['status', '--porcelain']),
+            releaseRef
+        };
+    } catch {
+        throw new CodeGraphError('Release scan must run inside the release checkout.');
+    }
+}
+
+async function activeRegistryName(explicit?: string): Promise<string> {
+    if (explicit?.trim()) return explicit.trim();
+    const key = await getActiveLocalApiKey();
+    const named = key?.registry_name?.trim();
+    if (named) return named;
+    if (key?.person) {
+        const active = await resolveActiveRegistry(key.person);
+        if (active) return active;
+    }
+    throw new CodeGraphError('Pass --registry. No active registry is selected.');
+}
+
+async function codeGraphsCommand(argv: string[]) {
+    try {
+        const registry = await activeRegistryName(parseFlag(argv, '--registry'));
+        const at = parseFlag(argv, '--at');
+        const history = hasFlag(argv, '--history');
+        if (at && history) throw new CodeGraphError('Pass --at or --history, not both.');
+        const sync = await getSyncConfig();
+        const graphs = await readCodeGraphs({
+            db,
+            origin: sync.upstreamUrl,
+            apiKey: sync.apiKey,
+            query: {
+                registry,
+                repo: parseFlag(argv, '--repo'),
+                scanner: parseFlag(argv, '--scanner'),
+                at,
+                history,
+                includeGraph: hasFlag(argv, '--include-graph')
+            }
+        });
+        console.log(JSON.stringify({ registry_name: registry, graphs, count: graphs.length }, null, 2));
+    } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
+async function codeGraphWriteCommand(argv: string[]) {
+    try {
+        const registry = parseFlag(argv, '--registry');
+        const scanner = parseFlag(argv, '--scanner');
+        const ref = parseFlag(argv, '--ref');
+        const graphPath = parseFlag(argv, '--graph');
+        if (argv[0] !== 'write' || !registry || !scanner || !ref || !graphPath) {
+            throw new CodeGraphError(
+                'Usage: uni code-graph write --registry Name --scanner name --ref branch --graph file.json [--repo url]'
+            );
+        }
+        const checkout = readReleaseCheckout(ref);
+        let repo = parseFlag(argv, '--repo');
+        if (!repo) {
+            try {
+                repo = gitOutput(['remote', 'get-url', 'origin']);
+            } catch {
+                throw new CodeGraphError('Pass --repo or run this from a checkout with an origin remote.');
+            }
+        }
+        const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as unknown;
+        const result = await publishCodeGraph({ registry, repo, scanner, graph, checkout });
+        console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
 }

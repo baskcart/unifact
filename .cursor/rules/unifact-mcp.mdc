@@ -14,5 +14,8 @@ For organizational truth, procedure, infra policy, naming, branding, and “how 
 3. If a needed fact is **missing**: ask the human one clarifying question, then `propose_fact` (or `upsert_fact` as proposed). Never assert it in public copy first.
 4. Propose via MCP; never treat drafts as published truth until review/publish.
 5. CLI (`uni …`) is for humans and MCP-down fallback; MCP is the default agent path.
+6. Before writing code that implements a behavior or depends on one, call `resolve_unispec`. `use_existing` means use that code and do not create another implementation. `follow_spec` means implement that published spec. `none` means propose a spec from the template before writing code.
+7. When the user says `unispec <subject>/<target>` and an optional version, call `get_unispec`. No version means the latest published spec. If it says use existing code, use that code. Otherwise carry out its Steps and Checks. Propose one code-link fact only when none is published. Do not publish unless the user asks.
+8. Before drafting a spec from a prompt, call `get_unispec_template`. A published company template wins over the shared one.
 
 Setup: see `docs/mcp.md` and `.cursor/mcp.json.example`.

@@ -51,6 +51,21 @@ import {
 import { compactAuditRows } from './history-format.js';
 import { extractFactCandidates } from './extract.js';
 import { pickAsOfArg } from './as-of.js';
+import { readCodeGraphs } from './code-graphs.js';
+import {
+    creationBlock,
+    decideCapability,
+    parseLinkValue,
+    parseUnispecInvocation,
+    resolveLink,
+    resolveSpec,
+    resolveTemplate,
+    specFactFromSnapshot,
+    UnispecError,
+    type FactSource,
+    type SpecFact
+} from './unispec.js';
+import { getSyncConfig } from './sync.js';
 import { readFileSync } from 'fs';
 import { resolve as resolvePath } from 'path';
 import {
@@ -68,7 +83,11 @@ export const UNIFACT_MCP_INSTRUCTIONS = [
     'If no registry is connected, use registry_status. After the user explicitly asks to join, use request_registry_join; do not send a join request silently.',
     'Before relying on memory or repository prose for those topics, run sync_pull when an upstream is configured, then use find_relevant_facts or search_facts.',
     'Treat published facts as governed truth. Proposed, review, and feedback facts are context, not final policy.',
-    'Agents may propose facts when permitted, but must not publish, retract, delete, approve, or reject facts without explicit user authorization.'
+    'Agents may propose facts when permitted, but must not publish, retract, delete, approve, or reject facts without explicit user authorization.',
+    'Before writing code that implements a behavior or depends on one, call resolve_unispec with that need. use_existing means do not create a spec or another implementation; use the code locator. follow_spec means that published spec is the one to implement. none means propose a spec from the template before writing code.',
+    'When the user says unispec <subject>/<target> and an optional version, call get_unispec. No version means the latest published spec. If the result is use_existing, use that code and do not write another implementation. Otherwise follow that spec’s Steps and Checks. Propose one code-link fact only when none is published, and do not publish it unless the user asks.',
+    'A company UniSpec template wins over the shared template. Read it with get_unispec_template before drafting a spec from a prompt.',
+    'Code graphs are release observations. Read them with list_code_graphs. Do not propose them as facts and do not push them.'
 ].join(' ');
 
 export function createUnifactMcpServer(): McpServer {
@@ -192,6 +211,72 @@ function errorResult(message: string) {
                 text: message
             }
         ]
+    };
+}
+
+async function unispecCatalog(registry: string): Promise<{ specs: SpecFact[]; links: SpecFact[] }> {
+    const rows = await db.all<{
+        namespace: string;
+        key: string;
+        version: number;
+        registry_channel: string;
+        value: string;
+    }>(
+        `
+      SELECT namespace, key, version, registry_channel, value
+      FROM facts
+      WHERE registry_name = ? AND namespace LIKE 'unispec.%'
+    `,
+        [registry]
+    );
+    const specs: SpecFact[] = [];
+    const links: SpecFact[] = [];
+    for (const row of rows) {
+        const fact: SpecFact = {
+            namespace: row.namespace,
+            key: row.key,
+            version: row.version,
+            registry_channel: row.registry_channel,
+            value: row.value
+        };
+        if (row.namespace.startsWith('unispec.link.')) links.push(fact);
+        else if (row.namespace !== 'unispec.template') specs.push(fact);
+    }
+    return { specs, links };
+}
+
+async function refuseDuplicateImplementation(registry: string, namespace: string, key: string): Promise<string | null> {
+    const { specs, links } = await unispecCatalog(registry);
+    return creationBlock(namespace, key, specs, links);
+}
+
+async function unispecSource(registry: string): Promise<FactSource> {
+    return {
+        async get(namespace, key) {
+            const fact = await getFactWithLookup(registry, namespace, key);
+            if (!fact || typeof fact.value !== 'string') return null;
+            return {
+                namespace: fact.namespace,
+                key: fact.key,
+                version: fact.version,
+                registry_channel: fact.registry_channel,
+                value: fact.value
+            };
+        },
+        async versions(namespace, key) {
+            const rows = await listFactVersions(registry, namespace, key);
+            const facts: SpecFact[] = [];
+            for (const row of rows) {
+                const spec = specFactFromSnapshot(
+                    { namespace, key },
+                    row.version,
+                    row.registry_channel,
+                    row.snapshot
+                );
+                if (spec) facts.push(spec);
+            }
+            return facts;
+        }
     };
 }
 
@@ -481,6 +566,8 @@ server.registerTool('upsert_fact', {
     try {
         const { namespace, key, registry: registryArg, ...input } = args;
         const registry = await resolveToolRegistry(registryArg);
+        const blocked = await refuseDuplicateImplementation(registry, namespace, key);
+        if (blocked) return errorResult(blocked);
         return toolResult(await upsertFact(registry, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
@@ -504,6 +591,8 @@ server.registerTool('propose_fact', {
     try {
         const { profile_id, namespace, key, registry: registryArg, ...input } = args;
         const registry = await resolveToolRegistry(registryArg);
+        const blocked = await refuseDuplicateImplementation(registry, namespace, key);
+        if (blocked) return errorResult(blocked);
         return toolResult(await proposeFactFromProfile(registry, profile_id, namespace, key, input));
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
@@ -891,6 +980,130 @@ server.registerTool('sync_status', {
 }, async () => {
     try {
         return toolResult(await getSyncStatus());
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('get_unispec', {
+    description:
+        'Read a published UniSpec. ref is "<subject>/<target>" or "<subject>/<target> <version>" or the chat form "unispec uuid7/java 3". Omit the version for the latest published spec. A draft is not returned.',
+    inputSchema: {
+        ref: z.string().min(1).describe('Spec id, such as uuid7/java or uuid7/java 3'),
+        ...optionalRegistryField
+    }
+}, async ({ ref, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const parsed = parseUnispecInvocation(ref);
+        const source = await unispecSource(registry);
+        const spec = await resolveSpec(source, parsed);
+        let code: string | null = null;
+        try {
+            code = parseLinkValue((await resolveLink(source, parsed)).value).code || null;
+        } catch {
+            code = null;
+        }
+        const call = parsed.version === null ? `unispec ${parsed.subject}/${parsed.target}` : `unispec ${parsed.subject}/${parsed.target} ${spec.version}`;
+        return toolResult({
+            call,
+            action: code ? 'use_existing' : 'follow_spec',
+            code,
+            message: code
+                ? `Do not create another implementation. Use ${code}. The spec is ${spec.namespace}/${spec.key} version ${spec.version}.`
+                : `${spec.namespace}/${spec.key} version ${spec.version} is the spec to implement. Propose one code link after the checks pass. Do not publish the link unless asked.`,
+            registry_name: registry,
+            namespace: spec.namespace,
+            key: spec.key,
+            version: spec.version,
+            value: spec.value
+        });
+    } catch (err) {
+        return errorResult(err instanceof UnispecError ? err.message : err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('resolve_unispec', {
+    description:
+        'Before writing code, resolve a need such as "uuid7" or "code that needs a UUID7" to a published spec. use_existing means use the code locator and do not create another implementation. follow_spec means implement that spec. none means no published spec matches.',
+    inputSchema: {
+        need: z.string().min(1).describe('What the code implements or depends on, such as uuid7 or uuid v7'),
+        ...optionalRegistryField
+    }
+}, async ({ need, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const { specs, links } = await unispecCatalog(registry);
+        const decision = decideCapability(need, specs, links);
+        return toolResult({
+            registry_name: registry,
+            action: decision.action,
+            message: decision.message,
+            matches: decision.matches.map((match) => ({
+                spec: `${match.spec.namespace}/${match.spec.key}`,
+                version: match.spec.version,
+                code: match.code
+            }))
+        });
+    } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('get_unispec_template', {
+    description:
+        'Read the UniSpec template used to draft a spec from a prompt. A published company template wins over the shared template unispec.template/default. Otherwise the built-in sections are returned.',
+    inputSchema: {
+        company: z.string().optional().describe('Company client id, such as acme.com. Omit for the shared template.'),
+        ...optionalRegistryField
+    }
+}, async ({ company, registry: registryArg }) => {
+    try {
+        const registry = await resolveToolRegistry(registryArg);
+        const resolved = await resolveTemplate(await unispecSource(registry), company);
+        return toolResult({
+            registry_name: registry,
+            namespace: resolved.path.namespace,
+            key: resolved.path.key,
+            builtin: resolved.builtin,
+            version: resolved.fact?.version ?? null,
+            value: resolved.value
+        });
+    } catch (err) {
+        return errorResult(err instanceof UnispecError ? err.message : err instanceof Error ? err.message : String(err));
+    }
+});
+
+server.registerTool('list_code_graphs', {
+    description:
+        'Read release code graphs from origin. This is an observation of a repo commit, not a fact, and it cannot be pushed or proposed.',
+    inputSchema: {
+        registry: z.string().optional().describe('Registry name. Defaults to the active registry.'),
+        repo: z.string().optional().describe('Git repository URL'),
+        scanner: z.string().optional().describe('Scanner name'),
+        at: z.string().optional().describe('ISO time. Returns the graph in force at that time.'),
+        history: z.boolean().optional().describe('Return closed ranges as well as the open one'),
+        include_graph: z.boolean().optional().describe('Include the JSON graph. Omit for the time range and commit only.')
+    }
+}, async ({ registry, repo, scanner, at, history, include_graph }) => {
+    try {
+        if (at && history) return errorResult('Pass at or history, not both.');
+        const sync = await getSyncConfig();
+        const registryName = registry?.trim() || (await requireWorkingRegistry(sync.person));
+        const graphs = await readCodeGraphs({
+            db,
+            origin: sync.upstreamUrl,
+            apiKey: sync.apiKey,
+            query: {
+                registry: registryName,
+                repo,
+                scanner,
+                at,
+                history,
+                includeGraph: include_graph === true
+            }
+        });
+        return toolResult({ registry_name: registryName, graphs, count: graphs.length });
     } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
     }

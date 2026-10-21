@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { AsyncLocalStorage } from 'async_hooks';
 import type { DbClient, RunResult } from './db-types.js';
+import { ensureCodeGraphs } from './code-graphs.js';
 import { pickDefaultRegistryName } from './migrate-fact-registry.js';
 
 const { Pool, types } = pg;
@@ -55,6 +56,7 @@ function poolConfig(connectionString: string): pg.PoolConfig {
     const useSsl = wantsSsl(connectionString);
     let cs = connectionString
         .replace(/([?&])sslmode=[^&]*/gi, '$1')
+        .replace(/([?&])sslrootcert=[^&]*/gi, '$1')
         .replace(/[?&]$/, '')
         .replace(/\?&/, '?')
         .replace(/&&+/g, '&');
@@ -440,6 +442,8 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_facts_version ON facts(registry_name, namespace, key, version);
       CREATE INDEX IF NOT EXISTS idx_fact_versions_fact ON fact_versions(registry_name, namespace, key, version);
     `);
+
+    await ensureCodeGraphs((sql) => pool.query(sql));
 }
 
 type Queryable = {

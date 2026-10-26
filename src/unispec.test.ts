@@ -134,7 +134,7 @@ describe('one implementation', () => {
             namespace: 'unispec.uuid7',
             key: 'java',
             specVersion: 2,
-            code: 'git:https://github.com/baskcart/unifact@abc123:examples/unispec/uuid7/Uuid7.java'
+            code: 'git:https://github.com/baskcart/unifact@abc123:impl/uuid7/Uuid7.java'
         })
     });
 

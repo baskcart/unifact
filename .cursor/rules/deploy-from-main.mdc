@@ -1,0 +1,6 @@
+---
+description: Production deploys only after a push to main
+alwaysApply: true
+---
+
+Push to main to deploy the Fly app. GitHub Actions runs flyctl deploy on a Fly builder. Do not run fly deploy or flyctl deploy from this machine.

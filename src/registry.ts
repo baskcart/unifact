@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { db, type JoinRequestRow, type RegistryRow } from './db.js';
-import { createApiKey, getApiKeyByPerson, setApiKeyEnabled, type ApiKeyRecord } from './keys.js';
+import { createApiKey, getApiKeyByPerson, recoverableSecret, setApiKeyEnabled, type ApiKeyRecord } from './keys.js';
+import { requestAuthHeaders } from './keyMaterial.js';
 import { getMetadataFromGitUrl } from './git-metadata.js';
 import { pullFactsFromRemote, upsertFact } from './store.js';
 import { getRemoteBranchUrl, pushPersonKeyToRemote, type RemoteKeyPushResult } from './sync.js';
@@ -482,6 +483,8 @@ export async function initRegistry(input: {
     parent_registry?: string | null;
     /** Preserve this secret (e.g. when mirroring an existing local key to origin). */
     api_key?: string;
+    /** Ed25519 public key to store on origin. The private key is not sent. */
+    public_key?: string | null;
     /**
      * When true (default for CLI), create the same org+owner key on upstream.
      * Origin handlers set false so mirroring does not recurse.
@@ -528,7 +531,8 @@ export async function initRegistry(input: {
         registry_name: name,
         namespaces: registryNamespaces(name),
         enabled: true,
-        api_key: input.api_key
+        api_key: input.api_key,
+        public_key: input.public_key
     });
 
     await setActiveRegistryFact(name);
@@ -569,7 +573,8 @@ async function mirrorRegistryToRemote(input: {
                 description: input.registry.description ?? undefined,
                 git_url: input.registry.git_url ?? undefined,
                 parent_registry: input.registry.parent_registry ?? undefined,
-                api_key: input.key.api_key
+                api_key: recoverableSecret(input.key) ?? undefined,
+                public_key: input.key.public_key ?? undefined
             })
         });
 
@@ -693,13 +698,24 @@ async function mirrorJoinToRemote(
     const remoteUrl = await getRemoteBranchUrl();
     if (!remoteUrl) return;
     const member = await getApiKeyByPerson(person);
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (member?.api_key) headers['X-API-Key'] = member.api_key;
-    await fetch(`${remoteUrl}/v1/registries/${encodeURIComponent(registryName)}/join`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ person, message })
+    const secret = member ? recoverableSecret(member) : null;
+    const url = `${remoteUrl}/v1/registries/${encodeURIComponent(registryName)}/join`;
+    const body = JSON.stringify({
+        person,
+        message,
+        candidate_api_key: secret ?? undefined,
+        public_key: member?.public_key ?? undefined
     });
+    const headers = secret
+        ? requestAuthHeaders({
+              secret,
+              privateKey: member?.private_key,
+              method: 'POST',
+              url,
+              body
+          })
+        : { 'Content-Type': 'application/json' };
+    await fetch(url, { method: 'POST', headers, body });
 }
 
 /**
@@ -768,14 +784,17 @@ export async function approveJoin(input: {
     // Push membership key to origin (not via uni pull — keys are push-only).
     let remote: RemoteKeyPushResult | undefined;
     const ownerKey = await getApiKeyByPerson(input.approved_by.trim());
-    if (ownerKey?.enabled && ownerKey.api_key) {
+    const ownerSecret = ownerKey ? recoverableSecret(ownerKey) : null;
+    if (ownerKey?.enabled && ownerSecret) {
         remote = await pushPersonKeyToRemote({
             person: key.person,
-            api_key: key.api_key,
+            api_key: recoverableSecret(key) ?? key.api_key,
+            public_key: key.public_key,
             namespaces: key.namespaces,
             scopes: key.scopes,
             enabled: true,
-            ownerApiKey: ownerKey.api_key
+            ownerApiKey: ownerSecret,
+            ownerPrivateKey: ownerKey.private_key
         });
     } else {
         remote = { attempted: false, pushed: false, detail: 'Owner has no enabled local key to auth origin push' };
@@ -839,14 +858,17 @@ export async function suspendJoin(input: {
 
     let remote: RemoteKeyPushResult | undefined;
     const ownerKey = await getApiKeyByPerson(input.suspended_by.trim());
-    if (ownerKey?.enabled && ownerKey.api_key) {
+    const ownerSecret = ownerKey ? recoverableSecret(ownerKey) : null;
+    if (ownerKey?.enabled && ownerSecret) {
         remote = await pushPersonKeyToRemote({
             person: key.person,
-            api_key: key.api_key,
+            api_key: recoverableSecret(key) ?? key.api_key,
+            public_key: key.public_key,
             namespaces: key.namespaces,
             scopes: key.scopes,
             enabled: false,
-            ownerApiKey: ownerKey.api_key
+            ownerApiKey: ownerSecret,
+            ownerPrivateKey: ownerKey.private_key
         });
     }
 

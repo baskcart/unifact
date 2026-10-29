@@ -1,15 +1,20 @@
 import { randomBytes, randomUUID } from 'crypto';
 import { db, type ApiKeyRow } from './db.js';
+import { generateIdentityKey, hashApiKey, isKeyHash, secretMatchesStored } from './keyMaterial.js';
 import { parseStringList, serializeStringListOrEmpty } from './model.js';
 
 export interface ApiKeyRecord {
     id: string;
     person: string;
+    /** Stored form: the secret on SQLite, `sha256:` + hex on the Postgres origin. */
     api_key: string;
     enabled: boolean;
     namespaces: string[];
     scopes: Array<'read' | 'write'>;
     registry_name: string | null;
+    public_key: string | null;
+    /** Set on SQLite. Null on the origin. */
+    private_key: string | null;
     created_at: number;
     updated_at: number;
 }
@@ -20,6 +25,8 @@ export interface CreateApiKeyInput {
     scopes?: Array<'read' | 'write'>;
     /** If set, use this key value instead of generating one (e.g. mirror local→origin). */
     api_key?: string;
+    /** Ed25519 public key from the client. The origin stores this and not the private key. */
+    public_key?: string | null;
     enabled?: boolean;
     registry_name?: string | null;
     /** Local CLI only: explicitly replace a temporary local secret with an origin-issued secret. */
@@ -38,6 +45,8 @@ function rowToRecord(row: ApiKeyRow): ApiKeyRecord {
         namespaces: parseStringList(row.namespaces),
         scopes: scopes.length > 0 ? scopes : ['read', 'write'],
         registry_name: row.registry_name ?? null,
+        public_key: row.public_key ?? null,
+        private_key: row.private_key ?? null,
         created_at: row.created_at,
         updated_at: row.updated_at
     };
@@ -76,13 +85,36 @@ export async function getApiKeyByPerson(person: string): Promise<ApiKeyRecord | 
     return row ? rowToRecord(row) : undefined;
 }
 
+/** Secret the client can send. Null when this database only kept the hash. */
+export function recoverableSecret(key: { api_key: string }): string | null {
+    return isKeyHash(key.api_key) ? null : key.api_key;
+}
+
+/** API view. Omits the private key and does not present a hash as if it were the secret. */
+export function apiKeyView(key: ApiKeyRecord) {
+    return {
+        id: key.id,
+        person: key.person,
+        enabled: key.enabled,
+        namespaces: key.namespaces,
+        scopes: key.scopes,
+        registry_name: key.registry_name,
+        public_key: key.public_key,
+        api_key: recoverableSecret(key) ?? undefined,
+        created_at: key.created_at,
+        updated_at: key.updated_at
+    };
+}
+
 export async function findApiKeyBySecret(apiKey: string | undefined): Promise<ApiKeyRecord | undefined> {
     if (!apiKey) return undefined;
+    const hashed = hashApiKey(apiKey);
     const row = await db.get<ApiKeyRow>(
-        'SELECT * FROM api_keys WHERE api_key = ? AND enabled = 1',
-        [apiKey]
+        'SELECT * FROM api_keys WHERE (api_key = ? OR api_key = ?) AND enabled = 1',
+        [hashed, apiKey]
     );
-    return row ? rowToRecord(row) : undefined;
+    if (!row || !secretMatchesStored(row.api_key, apiKey)) return undefined;
+    return rowToRecord(row);
 }
 
 export async function getActiveLocalApiKey(): Promise<ApiKeyRecord | undefined> {
@@ -122,10 +154,11 @@ export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyReco
     }
 
     const existing = await getApiKeyByPerson(person);
+    const incoming = input.api_key?.trim() || '';
     if (
         existing &&
-        input.api_key?.trim() &&
-        existing.api_key !== input.api_key.trim() &&
+        incoming &&
+        !secretMatchesStored(existing.api_key, incoming) &&
         input.replace_existing_secret !== true
     ) {
         throw new Error(
@@ -149,22 +182,36 @@ export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyReco
 
     // Keep the existing secret on update unless an explicit api_key is provided
     // (re-approve must widen namespaces without breaking the member's local key).
-    const apiKey =
-        input.api_key?.trim() ||
-        existing?.api_key ||
-        `uf_${person.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24)}_${randomBytes(12).toString('hex')}`;
+    const origin = db.backend === 'postgres';
+    let plain = incoming;
+    if (!plain) {
+        if (existing && !isKeyHash(existing.api_key)) plain = existing.api_key;
+        else if (!existing) {
+            plain = `uf_${person.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24)}_${randomBytes(12).toString('hex')}`;
+        }
+    }
+    const storedKey = plain ? (origin ? hashApiKey(plain) : plain) : existing!.api_key;
+    let publicKey = input.public_key?.trim() || existing?.public_key || null;
+    let privateKey: string | null = origin ? null : (existing?.private_key ?? null);
+    if (!origin && !privateKey) {
+        const identity = generateIdentityKey();
+        privateKey = identity.privateKey;
+        publicKey = publicKey || identity.publicKey;
+    }
 
     if (existing) {
         await db.run(
             `UPDATE api_keys
-             SET api_key = ?, enabled = ?, namespaces = ?, scopes = ?, registry_name = ?, updated_at = ?
+             SET api_key = ?, enabled = ?, namespaces = ?, scopes = ?, registry_name = ?, public_key = ?, private_key = ?, updated_at = ?
              WHERE person = ?`,
             [
-                apiKey,
+                storedKey,
                 enabled,
                 serializeStringListOrEmpty(namespaces, 'namespaces'),
                 serializeStringListOrEmpty(scopes, 'scopes'),
                 registryName ?? existing.registry_name,
+                publicKey,
+                privateKey,
                 now,
                 person
             ]
@@ -176,16 +223,18 @@ export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyReco
 
     const id = randomUUID();
     await db.run(
-        `INSERT INTO api_keys (id, person, api_key, enabled, namespaces, scopes, registry_name, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO api_keys (id, person, api_key, enabled, namespaces, scopes, registry_name, public_key, private_key, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             id,
             person,
-            apiKey,
+            storedKey,
             enabled,
             serializeStringListOrEmpty(namespaces, 'namespaces'),
             serializeStringListOrEmpty(scopes, 'scopes'),
             registryName,
+            publicKey,
+            privateKey,
             now,
             now
         ]

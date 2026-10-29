@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
+import { requestAuthHeaders } from '../dist/keyMaterial.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = await mkdtemp(join(tmpdir(), 'unifact-onboarding-'));
@@ -31,10 +32,6 @@ const initialized = spawnSync(process.execPath, [cli, 'init', 'Unifact', '--pers
     windowsHide: true
 });
 assert.equal(initialized.status, 0, initialized.stderr || initialized.stdout);
-
-const database = new Database(databasePath);
-const ownerKey = database.prepare('SELECT api_key FROM api_keys WHERE person = ?').get('admin').api_key;
-database.close();
 
 const child = spawn(process.execPath, [api], {
     cwd: repoRoot,
@@ -64,11 +61,26 @@ async function requestJoinHttp(person, candidate) {
     });
 }
 
-async function approve(person, apiKey) {
-    return fetch(`http://127.0.0.1:${port}/v1/registries/Unifact/approve`, {
+function loadKey(person) {
+    const database = new Database(databasePath, { readonly: true });
+    const row = database.prepare('SELECT api_key, private_key FROM api_keys WHERE person = ?').get(person);
+    database.close();
+    return row;
+}
+
+async function approve(person, apiKey, privateKey) {
+    const url = `http://127.0.0.1:${port}/v1/registries/Unifact/approve`;
+    const body = JSON.stringify({ person });
+    return fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-        body: JSON.stringify({ person })
+        headers: requestAuthHeaders({
+            secret: apiKey,
+            privateKey,
+            method: 'POST',
+            url,
+            body
+        }),
+        body
     });
 }
 
@@ -83,9 +95,11 @@ try {
     assert.equal(check.prepare('SELECT enabled FROM api_keys WHERE person = ?').get('claudeDesktop').enabled, 0);
     check.close();
 
-    assert.equal((await approve('claudeDesktop', ownerKey)).status, 200);
-    assert.equal((await approve('otherAgent', claudeKey)).status, 403);
-    assert.equal((await approve('otherAgent', ownerKey)).status, 200);
+    const owner = loadKey('admin');
+    assert.equal((await approve('claudeDesktop', owner.api_key, owner.private_key)).status, 200);
+    const claude = loadKey('claudeDesktop');
+    assert.equal((await approve('otherAgent', claude.api_key, claude.private_key)).status, 403);
+    assert.equal((await approve('otherAgent', owner.api_key, owner.private_key)).status, 200);
 
     check = new Database(databasePath, { readonly: true });
     const approved = check.prepare('SELECT api_key, enabled FROM api_keys WHERE person = ?').get('claudeDesktop');

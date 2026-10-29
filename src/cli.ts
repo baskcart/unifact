@@ -8,9 +8,11 @@ import {
     getActiveLocalApiKey,
     getApiKeyByPerson,
     listApiKeys,
+    recoverableSecret,
     setApiKeyEnabled,
     usePerson
 } from './keys.js';
+import { requestAuthHeaders } from './keyMaterial.js';
 import {
     approveJoin,
     assertPersonMemberOfRegistry,
@@ -820,7 +822,7 @@ async function initCommand(argv: string[]) {
         });
         console.log(`Initialized registry '${result.registry.name}'`);
         console.log(`  Owner: ${result.registry.owner_person}`);
-        console.log(`  Key:   ${result.key.api_key} (ON)`);
+        console.log(`  Key:   ${recoverableSecret(result.key) ?? '(hash only)'} (ON)`);
         console.log(`  Namespaces: ${result.key.namespaces.join(', ')}`);
         if (result.registry.git_url) console.log(`  Git:   ${result.registry.git_url}`);
         if (result.remote?.pushed) {
@@ -1054,12 +1056,26 @@ async function joinCommand(argv: string[]) {
         if (host) {
             const upstream = `http://${host}`;
             const active = await getActiveLocalApiKey();
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-            if (active?.api_key) headers['X-API-Key'] = active.api_key;
-            let response = await fetch(`${upstream}/v1/registries/${encodeURIComponent(registry)}/join`, {
+            const joinUrl = `${upstream}/v1/registries/${encodeURIComponent(registry)}/join`;
+            const joinBody = JSON.stringify({
+                person,
+                candidate_api_key: active ? recoverableSecret(active) ?? undefined : undefined,
+                public_key: active?.public_key ?? undefined
+            });
+            const secret = active ? recoverableSecret(active) : null;
+            const headers = secret
+                ? requestAuthHeaders({
+                      secret,
+                      privateKey: active?.private_key,
+                      method: 'POST',
+                      url: joinUrl,
+                      body: joinBody
+                  })
+                : { 'Content-Type': 'application/json' };
+            let response = await fetch(joinUrl, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ person })
+                body: joinBody
             });
             if (!response.ok && (response.status === 401 || response.status === 403)) {
                 response = await fetch(`${upstream}/v1/registries/${encodeURIComponent(registry)}/join`, {
@@ -1125,7 +1141,7 @@ async function approveCommand(argv: string[]) {
             pull: hasFlag(argv, '--pull')
         });
         console.log(`Approved '${person}' on registry '${registry}' (by ${by})`);
-        console.log(`  Key: ${result.key.api_key} (ON)`);
+        console.log(`  Key: ${recoverableSecret(result.key) ?? '(hash only)'} (ON)`);
         console.log(`  Namespaces: ${result.key.namespaces.join(', ')}`);
         if (result.remote?.pushed) {
             console.log('  Origin: member key pushed (write access on upstream)');
@@ -1936,6 +1952,7 @@ async function codeGraphsCommand(argv: string[]) {
             db,
             origin: sync.upstreamUrl,
             apiKey: sync.apiKey,
+            privateKey: sync.identityPrivateKey,
             query: {
                 registry,
                 repo: parseFlag(argv, '--repo'),
@@ -1992,7 +2009,7 @@ async function keyCommand(argv: string[]) {
             }
             for (const key of keys) {
                 console.log(
-                    `${key.enabled ? 'ON ' : 'OFF'}  ${key.person}  ${key.api_key}  ns=${key.namespaces.join(',')}`
+                    `${key.enabled ? 'ON ' : 'OFF'}  ${key.person}  ${recoverableSecret(key) ?? '(hash only)'}  ns=${key.namespaces.join(',')}`
                 );
             }
             return;
@@ -2006,7 +2023,7 @@ async function keyCommand(argv: string[]) {
                 process.exit(1);
             }
             const key = await setApiKeyEnabled(person, sub === 'on');
-            console.log(`${key.person}: ${key.enabled ? 'ON' : 'OFF'} (${key.api_key})`);
+            console.log(`${key.person}: ${key.enabled ? 'ON' : 'OFF'} (${recoverableSecret(key) ?? '(hash only)'})`);
             console.log('(Advanced) Prefer uni approve / uni suspend to manage membership.');
             return;
         }
@@ -2029,20 +2046,20 @@ async function keyCommand(argv: string[]) {
             let key = await listApiKeys().then((keys) => keys.find((k) => k.person === person));
             if (!key) {
                 key = await createApiKey({ person, namespaces, api_key: apiKeyArg });
-                console.log(`Local key for ${key.person}: ${key.api_key} (${key.enabled ? 'ON' : 'OFF'})`);
+                console.log(`Local key for ${key.person}: ${recoverableSecret(key) ?? '(hash only)'} (${key.enabled ? 'ON' : 'OFF'})`);
             } else if (apiKeyArg || namespacesArg) {
                 key = await createApiKey({
                     person,
                     namespaces: namespacesArg ? namespaces : key.namespaces,
-                    api_key: apiKeyArg || key.api_key,
+                    api_key: apiKeyArg || recoverableSecret(key) || undefined,
                     replace_existing_secret: Boolean(apiKeyArg)
                 });
                 console.log(
-                    `Updated local key for ${key.person}: ${key.api_key} ns=${key.namespaces.join(',')} (${key.enabled ? 'ON' : 'OFF'})`
+                    `Updated local key for ${key.person}: ${recoverableSecret(key) ?? '(hash only)'} ns=${key.namespaces.join(',')} (${key.enabled ? 'ON' : 'OFF'})`
                 );
             } else {
                 console.log(
-                    `Using existing local key for ${key.person}: ${key.api_key} (${key.enabled ? 'ON' : 'OFF'})`
+                    `Using existing local key for ${key.person}: ${recoverableSecret(key) ?? '(hash only)'} (${key.enabled ? 'ON' : 'OFF'})`
                 );
             }
 
@@ -2052,25 +2069,36 @@ async function keyCommand(argv: string[]) {
                     console.error('No upstream URL (set company.infrastructure/upstream-registry-url)');
                     process.exit(1);
                 }
+                const secret = recoverableSecret(key);
+                if (!secret) {
+                    console.error('This host only has a hash of that key, so it cannot register the secret on origin.');
+                    process.exit(1);
+                }
                 const payload = {
                     person: key.person,
-                    api_key: key.api_key,
+                    api_key: secret,
+                    public_key: key.public_key,
                     namespaces: key.namespaces,
                     scopes: key.scopes
                 };
-                let response = await fetch(`${upstream}/v1/keys`, {
+                const body = JSON.stringify(payload);
+                const keysUrl = `${upstream}/v1/keys`;
+                let response = await fetch(keysUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
+                    body
                 });
                 if (!response.ok && (response.status === 401 || response.status === 403)) {
-                    response = await fetch(`${upstream}/v1/keys`, {
+                    response = await fetch(keysUrl, {
                         method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': key.api_key
-                        },
-                        body: JSON.stringify(payload)
+                        headers: requestAuthHeaders({
+                            secret,
+                            privateKey: key.private_key,
+                            method: 'POST',
+                            url: keysUrl,
+                            body
+                        }),
+                        body
                     });
                 }
                 if (!response.ok) {

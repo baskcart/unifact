@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { AsyncLocalStorage } from 'async_hooks';
 import type { DbClient, RunResult } from './db-types.js';
 import { factsTableHasOrgUnique, resolveDefaultRegistryNameSqlite } from './migrate-fact-registry.js';
+import { generateIdentityKey } from './keyMaterial.js';
 
 const txContext = new AsyncLocalStorage<SqliteDb>();
 
@@ -17,6 +18,20 @@ class AsyncMutex {
             () => undefined
         );
         return next;
+    }
+}
+
+function ensureLocalIdentityKeys(sqlite: Database.Database) {
+    const rows = sqlite.prepare(
+        `SELECT person, private_key FROM api_keys`
+    ).all() as { person: string; private_key: string | null }[];
+    const update = sqlite.prepare(
+        `UPDATE api_keys SET public_key = ?, private_key = ? WHERE person = ? AND (private_key IS NULL OR private_key = '')`
+    );
+    for (const row of rows) {
+        if (row.private_key) continue;
+        const identity = generateIdentityKey();
+        update.run(identity.publicKey, identity.privateKey, row.person);
     }
 }
 
@@ -288,6 +303,9 @@ function initializeSchema(sqlite: Database.Database) {
         enabled INTEGER NOT NULL DEFAULT 1,
         namespaces TEXT NOT NULL DEFAULT '["*"]',
         scopes TEXT NOT NULL DEFAULT '["read","write"]',
+        registry_name TEXT,
+        public_key TEXT,
+        private_key TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -397,8 +415,11 @@ function initializeSchema(sqlite: Database.Database) {
     ]);
 
     ensureColumns(sqlite, 'api_keys', [
-        { name: 'registry_name', definition: 'TEXT' }
+        { name: 'registry_name', definition: 'TEXT' },
+        { name: 'public_key', definition: 'TEXT' },
+        { name: 'private_key', definition: 'TEXT' }
     ]);
+    ensureLocalIdentityKeys(sqlite);
 
     ensureColumns(sqlite, 'registries', [
         { name: 'parent_registry', definition: 'TEXT' },

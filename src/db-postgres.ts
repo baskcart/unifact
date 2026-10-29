@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import type { DbClient, RunResult } from './db-types.js';
 import { ensureCodeGraphs } from './code-graphs.js';
 import { pickDefaultRegistryName } from './migrate-fact-registry.js';
+import { hashApiKey, isKeyHash } from './keyMaterial.js';
 
 const { Pool, types } = pg;
 
@@ -237,6 +238,19 @@ async function migrateFactsToOrgPartitionPostgres(pool: pg.Pool): Promise<void> 
     await pool.query(`ALTER TABLE audit_log ALTER COLUMN registry_name SET DEFAULT 'local'`);
 }
 
+async function hashPlaintextApiKeys(pool: pg.Pool): Promise<void> {
+    const rows = await pool.query<{ person: string; api_key: string }>(
+        `SELECT person, api_key FROM api_keys`
+    );
+    for (const row of rows.rows) {
+        if (isKeyHash(row.api_key)) continue;
+        await pool.query(
+            `UPDATE api_keys SET api_key = $1, private_key = NULL WHERE person = $2`,
+            [hashApiKey(row.api_key), row.person]
+        );
+    }
+}
+
 async function initializeSchema(pool: pg.Pool): Promise<void> {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS facts (
@@ -334,6 +348,8 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
         namespaces TEXT NOT NULL DEFAULT '["*"]',
         scopes TEXT NOT NULL DEFAULT '["read","write"]',
         registry_name TEXT,
+        public_key TEXT,
+        private_key TEXT,
         created_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL
       );
@@ -419,6 +435,13 @@ async function initializeSchema(pool: pg.Pool): Promise<void> {
     await pool.query(`
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS registry_name TEXT
     `).catch(() => undefined);
+    await pool.query(`
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS public_key TEXT
+    `).catch(() => undefined);
+    await pool.query(`
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS private_key TEXT
+    `).catch(() => undefined);
+    await hashPlaintextApiKeys(pool);
 
     await pool.query(`
       ALTER TABLE registries ADD COLUMN IF NOT EXISTS parent_registry TEXT

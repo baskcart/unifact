@@ -114,6 +114,10 @@ export interface ApiKeyRow {
     namespaces: string;
     scopes: string;
     registry_name: string | null;
+    /** Ed25519 SPKI DER, base64. Present after the client generates an identity key. */
+    public_key?: string | null;
+    /** Ed25519 PKCS8 DER, base64. Local SQLite only. Never stored on the origin. */
+    private_key?: string | null;
     created_at: number;
     updated_at: number;
 }

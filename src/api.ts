@@ -3,12 +3,15 @@ import express, { Request, Response } from 'express';
 import { db } from './db.js';
 import { formatFacts, FormatType, FactData } from './format.js';
 import { requireAuth, requireAuthOrBootstrap, allowPublicOrgCreate, hasAccess } from './auth.js';
+import { secretMatchesStored } from './keyMaterial.js';
 import { unifactDiscoveryDocument } from './discovery.js';
 import {
+    apiKeyView,
     createApiKey,
     findApiKeyBySecret,
     getApiKeyByPerson,
     listApiKeys,
+    recoverableSecret,
     setApiKeyEnabled
 } from './keys.js';
 import {
@@ -74,7 +77,11 @@ import {
 const app = express();
 const PORT = process.env.PORT || 4110;
 
-app.use(express.json());
+app.use(express.json({
+    verify(req, _res, buf) {
+        (req as Request & { rawBody?: string }).rawBody = buf.toString('utf8');
+    }
+}));
 
 const publicJoinAttempts = new Map<string, { count: number; resetAt: number }>();
 function limitPublicJoin(req: Request, res: Response, next: () => void) {
@@ -126,7 +133,8 @@ app.get('/v1/keys', requireAuthOrBootstrap('read'), async (req: Request, res: Re
                 namespaces: k.namespaces,
                 scopes: k.scopes,
                 updated_at: k.updated_at,
-                api_key: caller && caller.person === k.person ? k.api_key : undefined
+                api_key: caller && caller.person === k.person ? recoverableSecret(k) ?? undefined : undefined,
+                public_key: k.public_key
             })),
             count: keys.length
         });
@@ -146,6 +154,7 @@ app.post('/v1/keys', requireAuthOrBootstrap('write'), async (req: Request, res: 
             ? body.scopes.map(String).filter((s): s is 'read' | 'write' => s === 'read' || s === 'write')
             : undefined;
         const apiKey = typeof body.api_key === 'string' ? body.api_key : undefined;
+        const publicKey = typeof body.public_key === 'string' ? body.public_key : undefined;
         const enabled = body.enabled === false ? false : true;
         const registryName =
             typeof body.registry_name === 'string' ? body.registry_name.trim() : undefined;
@@ -154,11 +163,12 @@ app.post('/v1/keys', requireAuthOrBootstrap('write'), async (req: Request, res: 
             namespaces,
             scopes,
             api_key: apiKey,
+            public_key: publicKey,
             enabled,
             registry_name: registryName
         });
         console.log(`[unifact] API key upserted for person=${key.person} enabled=${key.enabled}`);
-        return res.json({ success: true, key });
+        return res.json({ success: true, key: apiKeyView(key) });
     } catch (err) {
         return handleError(res, err, 'Failed to create API key');
     }
@@ -167,7 +177,7 @@ app.post('/v1/keys', requireAuthOrBootstrap('write'), async (req: Request, res: 
 app.post('/v1/keys/:person/on', requireAuth('write'), async (req: Request, res: Response) => {
     try {
         const key = await setApiKeyEnabled(req.params.person, true);
-        return res.json({ success: true, key });
+        return res.json({ success: true, key: apiKeyView(key) });
     } catch (err) {
         return handleError(res, err, 'Failed to enable API key');
     }
@@ -176,7 +186,7 @@ app.post('/v1/keys/:person/on', requireAuth('write'), async (req: Request, res: 
 app.post('/v1/keys/:person/off', requireAuth('write'), async (req: Request, res: Response) => {
     try {
         const key = await setApiKeyEnabled(req.params.person, false);
-        return res.json({ success: true, key });
+        return res.json({ success: true, key: apiKeyView(key) });
     } catch (err) {
         return handleError(res, err, 'Failed to disable API key');
     }
@@ -330,10 +340,11 @@ app.post('/v1/registries', allowPublicOrgCreate(), async (req: Request, res: Res
             parent_registry:
                 typeof body.parent_registry === 'string' ? body.parent_registry : undefined,
             api_key: typeof body.api_key === 'string' ? body.api_key : undefined,
+            public_key: typeof body.public_key === 'string' ? body.public_key : undefined,
             // Origin must not recurse into its own upstream when mirroring.
             syncRemote: false
         });
-        return res.json({ success: true, registry: result.registry, key: result.key });
+        return res.json({ success: true, registry: result.registry, key: apiKeyView(result.key) });
     } catch (err) {
         return handleError(res, err, 'Failed to init registry');
     }
@@ -359,19 +370,21 @@ app.post('/v1/registries/:name/join', limitPublicJoin, async (req: Request, res:
         });
         if (candidateKey) {
             const existing = await getApiKeyByPerson(person);
-            if (existing && existing.api_key !== candidateKey) {
+            if (existing && !secretMatchesStored(existing.api_key, candidateKey)) {
                 return res.status(409).json({
                     error: 'This person already has a different device key; use a distinct agent identity'
                 });
             }
-            if (!existing) {
+            const publicKey = typeof body.public_key === 'string' ? body.public_key.trim() : undefined;
+            if (!existing || (publicKey && publicKey !== existing.public_key)) {
                 await createApiKey({
                     person,
                     api_key: candidateKey,
-                    enabled: false,
+                    public_key: publicKey,
+                    enabled: existing ? existing.enabled : false,
                     registry_name: request.registry_name,
-                    namespaces: ['*'],
-                    scopes: ['read', 'write']
+                    namespaces: existing?.namespaces ?? ['*'],
+                    scopes: existing?.scopes ?? ['read', 'write']
                 });
             }
         }
@@ -410,7 +423,7 @@ app.post('/v1/registries/:name/approve', requireAuth('write'), async (req: Reque
             approved_by: caller.person,
             pull: body.pull === true
         });
-        return res.json({ success: true, ...result });
+        return res.json({ success: true, ...result, key: apiKeyView(result.key) });
     } catch (err) {
         return handleError(res, err, 'Failed to approve join');
     }
@@ -424,7 +437,7 @@ app.post('/v1/registries/:name/suspend', requireAuth('write'), async (req: Reque
             person: String(body.person || ''),
             suspended_by: String(body.suspended_by || body.approved_by || '')
         });
-        return res.json({ success: true, ...result });
+        return res.json({ success: true, ...result, key: apiKeyView(result.key) });
     } catch (err) {
         return handleError(res, err, 'Failed to suspend member');
     }

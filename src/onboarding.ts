@@ -1,4 +1,5 @@
-import { createApiKey, getActiveLocalApiKey, getApiKeyByPerson, usePerson } from './keys.js';
+import { requestAuthHeaders } from './keyMaterial.js';
+import { createApiKey, getActiveLocalApiKey, getApiKeyByPerson, recoverableSecret, usePerson } from './keys.js';
 import { getRegistry, initRegistry, listRegistriesForPerson } from './registry.js';
 import { getSyncStatus, upsertFact } from './store.js';
 import { getSyncConfig } from './sync.js';
@@ -98,14 +99,17 @@ export async function requestRemoteRegistryJoin(input: {
     });
     await usePerson(person);
 
-    const response = await fetch(`${upstream}/v1/registries/${encodeURIComponent(localRegistry.name)}/join`, {
+    const joinUrl = `${upstream}/v1/registries/${encodeURIComponent(localRegistry.name)}/join`;
+    const joinBody = JSON.stringify({
+        person,
+        message: input.message?.slice(0, 500),
+        candidate_api_key: recoverableSecret(key),
+        public_key: key.public_key
+    });
+    const response = await fetch(joinUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            person,
-            message: input.message?.slice(0, 500),
-            candidate_api_key: key.api_key
-        })
+        body: joinBody
     });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) {
@@ -136,7 +140,7 @@ export async function requestRemoteRegistryJoin(input: {
 
 async function getRemoteOwnerContext(upstreamUrl?: string) {
     const active = await getActiveLocalApiKey();
-    if (!active?.api_key) throw new Error('No active UniFact owner identity is configured on this device');
+    if (!active || !recoverableSecret(active)) throw new Error('No active UniFact owner identity is configured on this device');
     const config = await getSyncConfig();
     const upstream = normalizeUpstreamUrl(upstreamUrl || config.upstreamUrl || undefined);
     return { active, upstream };
@@ -147,10 +151,15 @@ export async function listRemoteRegistryJoinRequests(input: {
     upstream_url?: string;
 }) {
     const { active, upstream } = await getRemoteOwnerContext(input.upstream_url);
-    const response = await fetch(
-        `${upstream}/v1/registries/${encodeURIComponent(input.registry.trim())}/requests`,
-        { headers: { 'X-API-Key': active.api_key } }
-    );
+    const requestsUrl = `${upstream}/v1/registries/${encodeURIComponent(input.registry.trim())}/requests`;
+    const response = await fetch(requestsUrl, {
+        headers: requestAuthHeaders({
+            secret: recoverableSecret(active)!,
+            privateKey: active.private_key,
+            method: 'GET',
+            url: requestsUrl
+        })
+    });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) {
         throw new Error(`Could not list hosted join requests (${response.status}): ${String(body.error || response.statusText)}`);
@@ -170,17 +179,19 @@ export async function approveRemoteRegistryJoin(input: {
     upstream_url?: string;
 }) {
     const { active, upstream } = await getRemoteOwnerContext(input.upstream_url);
-    const response = await fetch(
-        `${upstream}/v1/registries/${encodeURIComponent(input.registry.trim())}/approve`,
-        {
+    const approveUrl = `${upstream}/v1/registries/${encodeURIComponent(input.registry.trim())}/approve`;
+    const approveBody = JSON.stringify({ person: normalizePerson(input.person) });
+    const response = await fetch(approveUrl, {
+        method: 'POST',
+        headers: requestAuthHeaders({
+            secret: recoverableSecret(active)!,
+            privateKey: active.private_key,
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-API-Key': active.api_key
-            },
-            body: JSON.stringify({ person: normalizePerson(input.person) })
-        }
-    );
+            url: approveUrl,
+            body: approveBody
+        }),
+        body: approveBody
+    });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) {
         throw new Error(`Could not approve hosted join request (${response.status}): ${String(body.error || response.statusText)}`);

@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { parseGitHostingUrl } from './git-metadata.js';
+import { requestAuthHeaders } from './keyMaterial.js';
 import type { DbClient } from './db-types.js';
 
 const { Pool } = pg;
@@ -311,6 +312,7 @@ export async function readCodeGraphs(input: {
     query: CodeGraphQuery;
     origin?: string | null;
     apiKey?: string | null;
+    privateKey?: string | null;
 }): Promise<CodeGraphRecord[]> {
     if (input.db.backend === 'postgres') return listCodeGraphs(input.db, input.query);
     if (!input.origin || !input.apiKey) {
@@ -319,6 +321,7 @@ export async function readCodeGraphs(input: {
     return fetchCodeGraphs({
         origin: input.origin,
         apiKey: input.apiKey,
+        privateKey: input.privateKey,
         ...input.query
     });
 }
@@ -326,6 +329,7 @@ export async function readCodeGraphs(input: {
 export async function fetchCodeGraphs(input: {
     origin: string;
     apiKey: string;
+    privateKey?: string | null;
     registry: string;
     repo?: string;
     scanner?: string;
@@ -342,7 +346,12 @@ export async function fetchCodeGraphs(input: {
     if (input.history) url.searchParams.set('history', 'true');
     if (input.includeGraph) url.searchParams.set('include_graph', 'true');
     const response = await fetch(url, {
-        headers: { 'X-API-Key': input.apiKey, Accept: 'application/json' }
+        headers: requestAuthHeaders({
+            secret: input.apiKey,
+            privateKey: input.privateKey,
+            method: 'GET',
+            url: url.toString()
+        })
     });
     const body = (await response.json().catch(() => ({}))) as { error?: string; graphs?: CodeGraphRecord[] };
     if (!response.ok) {

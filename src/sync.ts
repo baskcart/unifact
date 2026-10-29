@@ -1,11 +1,13 @@
 import 'dotenv/config';
 import { db } from './db.js';
-import { getActiveLocalApiKey } from './keys.js';
+import { getActiveLocalApiKey, recoverableSecret } from './keys.js';
+import { isKeyHash, requestAuthHeaders } from './keyMaterial.js';
 
 export interface SyncConfig {
     upstreamUrl: string | null;
     remoteUrl: string | null;
     apiKey: string | null;
+    identityPrivateKey: string | null;
     role: string;
     branch: string;
     enabled: boolean;
@@ -42,7 +44,7 @@ export async function getSyncConfig(): Promise<SyncConfig> {
 
     const upstreamUrl = urlFact || process.env.UNIFACT_UPSTREAM_REGISTRY_URL || null;
     const active = await getActiveLocalApiKey();
-    const apiKey = active?.api_key ?? null;
+    const apiKey = active ? recoverableSecret(active) : null;
     const role = roleFact || process.env.UNIFACT_UPSTREAM_REGISTRY_ROLE || 'staging';
     const source = urlFact ? 'fact' : upstreamUrl ? 'env' : 'none';
 
@@ -50,6 +52,7 @@ export async function getSyncConfig(): Promise<SyncConfig> {
         upstreamUrl,
         remoteUrl: upstreamUrl,
         apiKey,
+        identityPrivateKey: active?.private_key ?? null,
         role,
         branch: role,
         enabled: Boolean(upstreamUrl && apiKey),
@@ -82,7 +85,9 @@ export async function pushPersonKeyToRemote(input: {
     namespaces: string[];
     scopes: Array<'read' | 'write'>;
     enabled: boolean;
+    public_key?: string | null;
     ownerApiKey: string;
+    ownerPrivateKey?: string | null;
 }): Promise<RemoteKeyPushResult> {
     const remoteUrl = await getRemoteBranchUrl();
     if (!remoteUrl) {
@@ -90,19 +95,25 @@ export async function pushPersonKeyToRemote(input: {
     }
 
     try {
-        const response = await fetch(`${remoteUrl}/v1/keys`, {
+        const url = `${remoteUrl}/v1/keys`;
+        const body = JSON.stringify({
+            person: input.person,
+            api_key: isKeyHash(input.api_key) ? undefined : input.api_key,
+            public_key: input.public_key || undefined,
+            namespaces: input.namespaces,
+            scopes: input.scopes,
+            enabled: input.enabled
+        });
+        const response = await fetch(url, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-API-Key': input.ownerApiKey
-            },
-            body: JSON.stringify({
-                person: input.person,
-                api_key: input.api_key,
-                namespaces: input.namespaces,
-                scopes: input.scopes,
-                enabled: input.enabled
-            })
+            headers: requestAuthHeaders({
+                secret: input.ownerApiKey,
+                privateKey: input.ownerPrivateKey,
+                method: 'POST',
+                url,
+                body
+            }),
+            body
         });
 
         if (!response.ok) {
@@ -117,9 +128,18 @@ export async function pushPersonKeyToRemote(input: {
 
         // Ensure on/off matches (older hosts may ignore enabled on upsert).
         const toggle = input.enabled ? 'on' : 'off';
-        await fetch(`${remoteUrl}/v1/keys/${encodeURIComponent(input.person)}/${toggle}`, {
+        const toggleUrl = `${remoteUrl}/v1/keys/${encodeURIComponent(input.person)}/${toggle}`;
+        const toggleBody = '{}';
+        await fetch(toggleUrl, {
             method: 'POST',
-            headers: { 'X-API-Key': input.ownerApiKey }
+            headers: requestAuthHeaders({
+                secret: input.ownerApiKey,
+                privateKey: input.ownerPrivateKey,
+                method: 'POST',
+                url: toggleUrl,
+                body: toggleBody
+            }),
+            body: toggleBody
         }).catch(() => undefined);
 
         return { attempted: true, pushed: true };

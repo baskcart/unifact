@@ -40,7 +40,7 @@ export function unifactDiscoveryDocument(baseUrl?: string | null) {
         },
         auth: {
             humans_web: 'OAuth on the product site (e.g. GitHub) → person + org; not used by work agents',
-            agents: 'X-API-Key (person key). Same secret locally and on origin.',
+            agents: 'X-API-Key (person key). The laptop keeps the secret and an Ed25519 private key. The origin stores a SHA-256 hash and the public key. Requests for a key that has a public key also send X-UniFact-Timestamp and X-UniFact-Signature.',
             header: 'X-API-Key'
         },
         config: {

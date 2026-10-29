@@ -1,5 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
 import { countApiKeys, findApiKeyBySecret, keyHasAccess, apiKeyAllowsNamespace } from './keys.js';
+import { checkRequestSignature } from './keyMaterial.js';
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+    if (Array.isArray(value)) return value[0];
+    return value;
+}
 
 /**
  * Auth is DB-only: one API key per person in `api_keys`.
@@ -28,6 +34,18 @@ export function requireAuth(scope: 'read' | 'write') {
             return res.status(401).json({
                 error: 'Unauthorized: Unknown or disabled API key (local secret must match origin)'
             });
+        }
+
+        const signature = checkRequestSignature({
+            publicKey: record.public_key,
+            method: req.method,
+            path: req.originalUrl,
+            body: (req as Request & { rawBody?: string }).rawBody ?? '',
+            timestamp: headerValue(req.headers['x-unifact-timestamp']),
+            signature: headerValue(req.headers['x-unifact-signature'])
+        });
+        if (!signature.ok) {
+            return res.status(401).json({ error: signature.error });
         }
 
         if (!record.scopes.includes(scope)) {

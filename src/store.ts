@@ -26,6 +26,7 @@ import {
     serializeStringListOrEmpty,
     serializeValue
 } from './model.js';
+import { requestAuthHeaders } from './keyMaterial.js';
 import { getSyncConfig, getRemoteBranchUrl } from './sync.js';
 import { apiKeyAllowsNamespace, findApiKeyBySecret, listApiKeys } from './keys.js';
 import { assertCanWriteRegistry } from './registry.js';
@@ -1550,13 +1551,14 @@ export async function pullFactsFromRemote(namespaces?: string[]): Promise<SyncPu
         const pulledFacts: FactResponse[] = [];
 
         for (const namespace of targetNamespaces) {
-            const response = await fetch(
-                `${remoteUrl}/v1/registries/${encodeURIComponent(registryName)}/facts/${encodeURIComponent(namespace)}?include_metadata=true&registry_channel=published`,
-                {
-                headers: {
-                    'X-API-Key': config.apiKey,
-                    'Content-Type': 'application/json'
-                }
+            const url = `${remoteUrl}/v1/registries/${encodeURIComponent(registryName)}/facts/${encodeURIComponent(namespace)}?include_metadata=true&registry_channel=published`;
+            const response = await fetch(url, {
+                headers: requestAuthHeaders({
+                    secret: config.apiKey,
+                    privateKey: config.identityPrivateKey,
+                    method: 'GET',
+                    url
+                })
             });
 
             if (!response.ok) {
@@ -1773,15 +1775,18 @@ export async function pushFactsToRemote(selectors?: string[]): Promise<SyncPushR
                                   published_at: null
                               };
 
-                    const response = await fetch(
-                        `${remoteUrl}/v1/registries/${encodeURIComponent(registryName)}/facts/${encodeURIComponent(fact.namespace)}/${encodeURIComponent(fact.key)}`,
-                        {
+                    const url = `${remoteUrl}/v1/registries/${encodeURIComponent(registryName)}/facts/${encodeURIComponent(fact.namespace)}/${encodeURIComponent(fact.key)}`;
+                    const body = JSON.stringify(payload);
+                    const response = await fetch(url, {
                             method: 'PUT',
-                            headers: {
-                                'X-API-Key': config.apiKey,
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify(payload)
+                            headers: requestAuthHeaders({
+                                secret: config.apiKey,
+                                privateKey: config.identityPrivateKey,
+                                method: 'PUT',
+                                url,
+                                body
+                            }),
+                            body
                         }
                     );
 

@@ -55,11 +55,9 @@ import { readCodeGraphs } from './code-graphs.js';
 import {
     creationBlock,
     decideCapability,
-    parseLinkValue,
     parseUnispecInvocation,
-    resolveLink,
-    resolveSpec,
     resolveTemplate,
+    resolveUnispecCall,
     specFactFromSnapshot,
     UnispecError,
     type FactSource,
@@ -84,7 +82,7 @@ export const UNIFACT_MCP_INSTRUCTIONS = [
     'Before relying on memory or repository prose for those topics, run sync_pull when an upstream is configured, then use find_relevant_facts or search_facts.',
     'Treat published facts as governed truth. Proposed, review, and feedback facts are context, not final policy.',
     'Agents may propose facts when permitted, but must not publish, retract, delete, approve, or reject facts without explicit user authorization.',
-    'Before writing code that implements a behavior or depends on one, call resolve_unispec with that need. use_existing means do not create a spec or another implementation; use the code locator. follow_spec means that published spec is the one to implement. none means propose a spec from the template before writing code.',
+        'Before writing code that implements a behavior or depends on one, call resolve_unispec with that need. use_existing means do not create a spec or another implementation of that language; use the code locator. A different language is a new link on the same spec. follow_spec means that published spec is the one to implement. none means propose a spec from the template before writing code.',
     'When the user says unispec <subject>/<target> and an optional version, call get_unispec. No version means the latest published spec. If the result is use_existing, use that code and do not write another implementation. Otherwise follow that spec’s Steps and Checks. Propose one code-link fact only when none is published, and do not publish it unless the user asks.',
     'A company UniSpec template wins over the shared template. Read it with get_unispec_template before drafting a spec from a prompt.',
     'Code graphs are release observations. Read them with list_code_graphs. Do not propose them as facts and do not push them.'
@@ -997,20 +995,14 @@ server.registerTool('get_unispec', {
         const registry = await resolveToolRegistry(registryArg);
         const parsed = parseUnispecInvocation(ref);
         const source = await unispecSource(registry);
-        const spec = await resolveSpec(source, parsed);
-        let code: string | null = null;
-        try {
-            code = parseLinkValue((await resolveLink(source, parsed)).value).code || null;
-        } catch {
-            code = null;
-        }
+        const { spec, code } = await resolveUnispecCall(source, parsed);
         const call = parsed.version === null ? `unispec ${parsed.subject}/${parsed.target}` : `unispec ${parsed.subject}/${parsed.target} ${spec.version}`;
         return toolResult({
             call,
             action: code ? 'use_existing' : 'follow_spec',
             code,
             message: code
-                ? `Do not create another implementation. Use ${code}. The spec is ${spec.namespace}/${spec.key} version ${spec.version}.`
+                ? `Use ${code}. The spec is ${spec.namespace}/${spec.key} version ${spec.version}.`
                 : `${spec.namespace}/${spec.key} version ${spec.version} is the spec to implement. Propose one code link after the checks pass. Do not publish the link unless asked.`,
             registry_name: registry,
             namespace: spec.namespace,
@@ -1025,7 +1017,7 @@ server.registerTool('get_unispec', {
 
 server.registerTool('resolve_unispec', {
     description:
-        'Before writing code, resolve a need such as "uuid7" or "code that needs a UUID7" to a published spec. use_existing means use the code locator and do not create another implementation. follow_spec means implement that spec. none means no published spec matches.',
+        'Before writing code, resolve a need such as "uuid7" or "code that needs a UUID7" to a published spec. use_existing means use the code locator for that language and do not create another implementation of it. A different language is a new link on the same spec. follow_spec means implement that spec. none means no published spec matches.',
     inputSchema: {
         need: z.string().min(1).describe('What the code implements or depends on, such as uuid7 or uuid v7'),
         ...optionalRegistryField
@@ -1094,6 +1086,7 @@ server.registerTool('list_code_graphs', {
             db,
             origin: sync.upstreamUrl,
             apiKey: sync.apiKey,
+            privateKey: sync.identityPrivateKey,
             query: {
                 registry: registryName,
                 repo,

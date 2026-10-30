@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>UUID7</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 40rem; }
+    button { font-size: 1rem; padding: 0.5rem 1rem; }
+    dl { display: grid; grid-template-columns: 8rem 1fr; gap: 0.5rem 1rem; margin-top: 1.5rem; }
+    dd { margin: 0; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>UUID7</h1>
+  <p>Each press increments the counter and calls the TypeScript UUID7 module.</p>
+  <button id="press" type="button">Press</button>
+  <dl>
+    <dt>Count</dt><dd id="count">0</dd>
+    <dt>UUID</dt><dd id="uuid">—</dd>
+    <dt>Timestamp</dt><dd id="timestamp">—</dd>
+    <dt>Version</dt><dd id="version">—</dd>
+    <dt>Random</dt><dd id="random">—</dd>
+  </dl>
+  <script type="module">
+    import { generate, parts } from "./uuid7.js";
+    const clock = new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+      fractionalSecondDigits: 3,
+      timeZoneName: "short"
+    });
+    let count = 0;
+    document.getElementById("press").addEventListener("click", () => {
+      count += 1;
+      const id = generate();
+      const piece = parts(id);
+      document.getElementById("count").textContent = String(count);
+      document.getElementById("uuid").textContent = id;
+      document.getElementById("timestamp").textContent = clock.format(piece.timestamp);
+      document.getElementById("version").textContent = String(piece.version);
+      document.getElementById("random").textContent = piece.random;
+    });
+  </script>
+</body>
+</html>

@@ -207,6 +207,31 @@ export interface CapabilityDecision {
     message: string;
 }
 
+const LANGUAGE_NAMES = ['java', 'typescript', 'javascript', 'rust', 'python', 'go'];
+
+function latestFact(rows: SpecFact[]): SpecFact | null {
+    return rows.reduce<SpecFact | null>((best, row) => (!best || row.version > best.version ? row : best), null);
+}
+
+function linksForCapability(links: SpecFact[], cap: string): SpecFact[] {
+    return links.filter((row) => capabilityKey(linkSubject(row.namespace) || '') === cap);
+}
+
+/** A language word in the need selects that code link. ts and js are aliases. */
+export function requestedLanguage(need: string): string | null {
+    const aliases: Record<string, string> = { ts: 'typescript', js: 'javascript' };
+    const tokens = need.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    for (const token of tokens) {
+        const name = aliases[token] || token;
+        if (LANGUAGE_NAMES.includes(name)) return name;
+    }
+    return null;
+}
+
+function linkCode(link: SpecFact | null): string | null {
+    return link ? parseLinkValue(link.value).code || null : null;
+}
+
 export function decideCapability(need: string, specs: SpecFact[], links: SpecFact[]): CapabilityDecision {
     const publishedSpecs = published(specs).filter((row) => specSubject(row.namespace));
     const known = new Set(publishedSpecs.map((row) => capabilityKey(specSubject(row.namespace) || '')));
@@ -219,42 +244,67 @@ export function decideCapability(need: string, specs: SpecFact[], links: SpecFac
         if (!current || row.version > current.version) byCapability.set(cap, row);
     }
     const publishedLinks = published(links);
-    const matches = [...byCapability.entries()].map(([cap, spec]) => {
-        const link = publishedLinks
-            .filter((row) => capabilityKey(linkSubject(row.namespace) || '') === cap)
-            .reduce<SpecFact | null>((best, row) => (!best || row.version > best.version ? row : best), null);
-        return { spec, link, code: link ? parseLinkValue(link.value).code || null : null };
-    });
-    if (matches.length === 0) {
+    if (byCapability.size === 0) {
         return {
             action: 'none',
             matches: [],
             message: 'No published spec matches. Propose a spec from the template before writing code.'
         };
     }
-    if (matches.length > 1 || matches.some((match) => publishedLinks.filter((row) => capabilityKey(linkSubject(row.namespace) || '') === capabilityKey(specSubject(match.spec.namespace) || '')).length > 1)) {
-        const listed = matches
-            .map((match) => `${match.spec.namespace}/${match.spec.key}${match.code ? ` code: ${match.code}` : ''}`)
+    if (byCapability.size > 1) {
+        const listed = [...byCapability.values()]
+            .map((spec) => `${spec.namespace}/${spec.key}`)
             .join('; ');
         return {
             action: 'choose',
-            matches,
+            matches: [...byCapability.values()].map((spec) => ({ spec, link: null, code: null })),
             message: `More than one published spec matches. Use one of these and do not create another: ${listed}.`
         };
     }
-    const match = matches[0];
-    const id = `${match.spec.namespace}/${match.spec.key}`;
-    if (match.code) {
+    const spec = [...byCapability.values()][0];
+    const cap = capabilityKey(specSubject(spec.namespace) || '');
+    const capLinks = linksForCapability(publishedLinks, cap);
+    const id = `${spec.namespace}/${spec.key}`;
+    const language = requestedLanguage(need);
+    if (language) {
+        const link = latestFact(capLinks.filter((row) => row.key.toLowerCase() === language));
+        const code = linkCode(link);
+        if (code) {
+            return {
+                action: 'use_existing',
+                matches: [{ spec, link, code }],
+                message: `Do not create another ${language} implementation. Use ${code}. The spec is ${id} version ${spec.version}.`
+            };
+        }
+        return {
+            action: 'follow_spec',
+            matches: [{ spec, link: null, code: null }],
+            message: `${id} version ${spec.version} is the spec. Implement it in ${language}, then propose one code link at unispec.link.${specSubject(spec.namespace)}/${language}.`
+        };
+    }
+    if (capLinks.length > 1) {
+        const listed = capLinks
+            .map((link) => `${link.key}: ${linkCode(link) || link.namespace + '/' + link.key}`)
+            .join('; ');
+        return {
+            action: 'choose',
+            matches: capLinks.map((link) => ({ spec, link, code: linkCode(link) })),
+            message: `This spec has more than one language. Use one of these and do not create another: ${listed}.`
+        };
+    }
+    const link = latestFact(capLinks);
+    const code = linkCode(link);
+    if (code) {
         return {
             action: 'use_existing',
-            matches,
-            message: `Do not create another implementation. Use ${match.code}. The spec is ${id} version ${match.spec.version}.`
+            matches: [{ spec, link, code }],
+            message: `Do not create another implementation. Use ${code}. The spec is ${id} version ${spec.version}.`
         };
     }
     return {
         action: 'follow_spec',
-        matches,
-        message: `${id} version ${match.spec.version} is already the spec. Do not create a second spec. Implement this one, then propose one code link.`
+        matches: [{ spec, link: null, code: null }],
+        message: `${id} version ${spec.version} is already the spec. Do not create a second spec. Implement this one, then propose one code link.`
     };
 }
 
@@ -275,14 +325,6 @@ export function creationBlock(namespace: string, key: string, specs: SpecFact[],
     const cap = capabilityKey(asLink);
     const spec = published(specs).find((row) => capabilityKey(specSubject(row.namespace) || '') === cap);
     if (!spec) return 'Publish the spec before linking code.';
-    const existing = published(links).filter((row) => capabilityKey(linkSubject(row.namespace) || '') === cap);
-    const other = existing.find((row) => row.namespace !== namespace || row.key !== key);
-    if (other) {
-        const code = parseLinkValue(other.value).code;
-        return code
-            ? `Do not create another implementation. Use ${code}.`
-            : `Do not create another implementation. ${other.namespace}/${other.key} is already linked.`;
-    }
     return null;
 }
 
@@ -363,4 +405,47 @@ export async function resolveLink(source: FactSource, ref: UnispecRef): Promise<
         source.versions(path.namespace, path.key)
     ]);
     return selectLink(mergeCurrent(current, versions), ref.version);
+}
+
+/** `spec: unispec.uuid7/java` on a link points back at that spec. */
+export function refFromSpecLine(spec: string, version: number | null): UnispecRef {
+    const slash = spec.lastIndexOf('/');
+    const namespace = slash > 0 ? spec.slice(0, slash) : '';
+    const key = slash > 0 ? spec.slice(slash + 1) : '';
+    const subject = namespace.startsWith('unispec.') ? namespace.slice('unispec.'.length) : '';
+    if (!subject || subject.startsWith('link.') || !ID_PART.test(subject) || !ID_PART.test(key)) {
+        throw new UnispecError('The link does not name a spec.');
+    }
+    return { subject, target: key, version };
+}
+
+/**
+ * `unispec uuid7/java` reads that spec and the java link.
+ * `unispec uuid7/typescript` reads the typescript link and the spec that link names.
+ */
+export async function resolveUnispecCall(
+    source: FactSource,
+    ref: UnispecRef
+): Promise<{ spec: SpecFact; code: string | null }> {
+    try {
+        const spec = await resolveSpec(source, ref);
+        let code: string | null = null;
+        try {
+            code = parseLinkValue((await resolveLink(source, ref)).value).code || null;
+        } catch (error) {
+            if (!(error instanceof UnispecError)) throw error;
+        }
+        return { spec, code };
+    } catch (error) {
+        if (!(error instanceof UnispecError)) throw error;
+        let link: SpecFact;
+        try {
+            link = await resolveLink(source, ref);
+        } catch {
+            throw error;
+        }
+        const parsed = parseLinkValue(link.value);
+        const spec = await resolveSpec(source, refFromSpecLine(parsed.spec, parsed.specVersion));
+        return { spec, code: parsed.code || null };
+    }
 }

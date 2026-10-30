@@ -9,6 +9,8 @@ import {
     parseUnispecInvocation,
     resolveSpec,
     resolveTemplate,
+    resolveUnispecCall,
+    type FactSource,
     selectLink,
     selectPublishedSpec,
     specFactPath,
@@ -156,17 +158,39 @@ describe('one implementation', () => {
         assert.match(decision.message, /already the spec/);
     });
 
-    it('refuses a second spec and a second implementation', () => {
+    it('allows another language on the same spec', () => {
         assert.match(
             creationBlock('unispec.uuid-7', 'java', [spec], [link]) || '',
             /already the spec/
         );
-        assert.match(
-            creationBlock('unispec.link.uuid7', 'python', [spec], [link]) || '',
-            /Use git:/
-        );
+        assert.equal(creationBlock('unispec.link.uuid7', 'typescript', [spec], [link]), null);
         assert.equal(creationBlock('unispec.uuid7', 'java', [spec], [link]), null);
         assert.equal(creationBlock('company.guidelines', 'hours', [spec], [link]), null);
+    });
+
+    it('uses the language named in the need', () => {
+        const typescript = fact({
+            namespace: 'unispec.link.uuid7',
+            key: 'typescript',
+            version: 1,
+            registry_channel: 'published',
+            value: formatLinkValue({
+                namespace: 'unispec.uuid7',
+                key: 'java',
+                specVersion: 2,
+                code: 'impl/uuid7/uuid7.ts'
+            })
+        });
+        const named = decideCapability('typescript UUID7', [spec], [link, typescript]);
+        assert.equal(named.action, 'use_existing');
+        assert.match(named.message, /uuid7\.ts/);
+        const open = decideCapability('a typescript UUID7', [spec], [link]);
+        assert.equal(open.action, 'follow_spec');
+        assert.match(open.message, /unispec\.link\.uuid7\/typescript/);
+        const either = decideCapability('uuid v7', [spec], [link, typescript]);
+        assert.equal(either.action, 'choose');
+        assert.match(either.message, /java:/);
+        assert.match(either.message, /typescript:/);
     });
 });
 
@@ -201,5 +225,51 @@ describe('resolve spec', () => {
         );
         assert.equal(resolved.value, 'ship it');
         assert.equal(resolved.version, 2);
+    });
+});
+
+describe('language link', () => {
+    const spec = fact({ version: 3, registry_channel: 'published', value: 'rfc 9562' });
+    const java = fact({
+        namespace: 'unispec.link.uuid7',
+        key: 'java',
+        version: 1,
+        registry_channel: 'published',
+        value: formatLinkValue({
+            namespace: 'unispec.uuid7',
+            key: 'java',
+            specVersion: 3,
+            code: 'impl/uuid7/Uuid7.java'
+        })
+    });
+    const typescript = fact({
+        namespace: 'unispec.link.uuid7',
+        key: 'typescript',
+        version: 1,
+        registry_channel: 'published',
+        value: formatLinkValue({
+            namespace: 'unispec.uuid7',
+            key: 'java',
+            specVersion: 3,
+            code: 'impl/uuid7/uuid7.ts'
+        })
+    });
+    const source: FactSource = {
+        async get(namespace, key) {
+            return [spec, java, typescript].find((row) => row.namespace === namespace && row.key === key) ?? null;
+        },
+        async versions(namespace, key) {
+            const row = await this.get(namespace, key);
+            return row ? [row] : [];
+        }
+    };
+
+    it('reads a language link back to the one spec', async () => {
+        const named = await resolveUnispecCall(source, { subject: 'uuid7', target: 'typescript', version: null });
+        assert.equal(named.spec.namespace, 'unispec.uuid7');
+        assert.equal(named.spec.key, 'java');
+        assert.equal(named.code, 'impl/uuid7/uuid7.ts');
+        const javaCall = await resolveUnispecCall(source, { subject: 'uuid7', target: 'java', version: null });
+        assert.equal(javaCall.code, 'impl/uuid7/Uuid7.java');
     });
 });
